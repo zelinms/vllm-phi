@@ -96,13 +96,13 @@ class MixtralMoE(nn.Module):
             torch.empty(self.num_total_experts,
                         2 * self.intermediate_size,
                         self.hidden_size,
-                        device="cuda",
+                        device="cpu",
                         dtype=self.params_dtype))
         self.w2s = nn.Parameter(
             torch.empty(self.num_total_experts,
                         self.hidden_size,
                         self.intermediate_size,
-                        device="cuda",
+                        device="cpu",
                         dtype=self.params_dtype))
 
         set_weight_attrs(self.ws, {
@@ -165,14 +165,16 @@ class MixtralMoE(nn.Module):
                     self.ws.data[expert, :, :])
                 w2s[expert, :, :], self.w2s_scale[
                     expert] = ops.scaled_fp8_quant(self.w2s.data[expert, :, :])
-            self.ws = nn.Parameter(ws, requires_grad=False)
-            self.w2s = nn.Parameter(w2s, requires_grad=False)
 
+            self.ws = nn.Parameter(ws.to("cuda"), requires_grad=False)
+            self.w2s = nn.Parameter(w2s.to("cuda"), requires_grad=False)
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+        #print (self.ws)
+        #import pdb;pdb.set_trace()
         final_hidden_states = fused_moe(hidden_states,
                                         self.ws,
                                         self.w2s,
