@@ -20,7 +20,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only Mixtral model."""
+"""Inference-only PhiMoE model."""
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -34,7 +34,6 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.fused_moe import fused_moe
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -53,8 +52,8 @@ from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
 
 
-class MixtralMoE(nn.Module):
-    """A tensor-parallel MoE implementation for Mixtral that shards each expert
+class PhiMoE(nn.Module):
+    """A tensor-parallel MoE implementation for PhiMoE that shards each expert
     across all ranks.
 
     Each expert's weights are sharded across all ranks and a fused MoE
@@ -199,7 +198,7 @@ class MixtralMoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
-class MixtralAttention(nn.Module):
+class PhiMoEAttention(nn.Module):
 
     def __init__(self,
                  hidden_size: int,
@@ -234,7 +233,7 @@ class MixtralAttention(nn.Module):
 
         if isinstance(quant_config, Fp8Config):
             print_warning_once(
-                "For Mixtral FP8 quantization, we currently do not quantize "
+                "For PhiMoE FP8 quantization, we currently do not quantize "
                 "the attention layers until their FP8 performance is improved."
             )
             quant_config = None
@@ -244,13 +243,13 @@ class MixtralAttention(nn.Module):
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=False,
+            bias=True,
             quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
-            bias=False,
+            bias=True,
             quant_config=quant_config,
         )
         self.rotary_emb = get_rope(
@@ -283,7 +282,7 @@ class MixtralAttention(nn.Module):
         return output
 
 
-class MixtralDecoderLayer(nn.Module):
+class PhiMoEDecoderLayer(nn.Module):
 
     def __init__(
         self,
@@ -294,7 +293,7 @@ class MixtralDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
-        self.self_attn = MixtralAttention(
+        self.self_attn = PhiMoEAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
@@ -302,16 +301,21 @@ class MixtralDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             sliding_window=config.sliding_window,
             quant_config=quant_config)
-        self.block_sparse_moe = MixtralMoE(
+        
+        self.block_sparse_moe = PhiMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config)
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+        
+
+        self.input_layernorm = nn.LayerNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps,
+                                       elementwise_affine=True)
+        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps,
+                                                elementwise_affine=True)
 
     def forward(
         self,
@@ -322,27 +326,29 @@ class MixtralDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
         # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+        # if residual is None:
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        # else:
+        #     hidden_states, residual = self.input_layernorm(
+        #         hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-
+        hidden_states = hidden_states + residual
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.block_sparse_moe(hidden_states)
+
+        hidden_states = hidden_states + residual
         return hidden_states, residual
 
 
-class MixtralModel(nn.Module):
+class PhiMoEModel(nn.Module):
 
     def __init__(
         self,
@@ -363,10 +369,10 @@ class MixtralModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            MixtralDecoderLayer(config, quant_config=quant_config)
+            PhiMoEDecoderLayer(config, quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
         ])
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps, elementwise_affine=True)
 
     def forward(
         self,
@@ -382,11 +388,11 @@ class MixtralModel(nn.Module):
             hidden_states, residual = layer(positions, hidden_states,
                                             kv_caches[i], attn_metadata,
                                             residual)
-        hidden_states, _ = self.norm(hidden_states, residual)
+        hidden_states = self.norm(hidden_states)
         return hidden_states
 
 
-class MixtralForCausalLM(nn.Module):
+class PhiMoEForCausalLM(nn.Module):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -418,7 +424,7 @@ class MixtralForCausalLM(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        self.model = MixtralModel(config,
+        self.model = PhiMoEModel(config,
                                   quant_config,
                                   lora_config=lora_config)
         self.unpadded_vocab_size = config.vocab_size
@@ -432,7 +438,9 @@ class MixtralForCausalLM(nn.Module):
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
+            bias=True
         )
+        
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
