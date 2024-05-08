@@ -183,8 +183,9 @@ class PhiMoE(nn.Module):
                                         self.w2s,
                                         router_logits,
                                         self.top_k,
-                                        renormalize=True,
                                         inplace=True,
+                                        renormalize=False,
+                                        sparse_mixer=True
                                         use_fp8=self.use_fp8,
                                         w1_scale=self.ws_scale,
                                         w2_scale=self.w2s_scale,
