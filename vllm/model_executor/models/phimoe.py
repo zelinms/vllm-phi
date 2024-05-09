@@ -262,12 +262,12 @@ class PhiMoEAttention(nn.Module):
         rotary_scale_base = None
         device = torch.device("cuda")
         self.rotary_emb_flash = rotary_cls(rotary_dim, base=rotary_base, scale_base=rotary_scale_base, device=device)        
-          
+       
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=rotary_dim,
+            rotary_dim=self.head_dim,
             max_position=max_position,
-            base=torch.tensor(rotary_base),
+            base=int(self.rope_theta),
             is_neox_style=True,
         )
         self.attn = Attention(
