@@ -205,7 +205,7 @@ class PhiMoEAttention(nn.Module):
                  hidden_size: int,
                  num_heads: int,
                  num_kv_heads: int,
-                 max_position: int = 4096 * 32,
+                 max_position: int = 4096,
                  rope_theta: float = 10000,
                  quant_config: Optional[QuantizationConfig] = None,
                  sliding_window: Optional[int] = None,
@@ -262,12 +262,12 @@ class PhiMoEAttention(nn.Module):
         rotary_scale_base = None
         device = torch.device("cuda")
         self.rotary_emb_flash = rotary_cls(rotary_dim, base=rotary_base, scale_base=rotary_scale_base, device=device)        
-        
+          
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
+            rotary_dim=rotary_dim,
             max_position=max_position,
-            base=int(self.rope_theta),
+            base=torch.tensor(rotary_base),
             is_neox_style=True,
         )
         self.attn = Attention(
@@ -287,23 +287,25 @@ class PhiMoEAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
+        
         qu, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        #qu1, k1, v1 = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        #qu_origin, k_origin = self.rotary_emb(positions, qu1, k1)
+        qu, k = self.rotary_emb(positions, qu, k)
         
         #import pdb;pdb.set_trace()
         ## kv_cache is None & past_key_value is a dictionary
         ## seqlen_offset = max(past_key_value.get_usable_length(kv_seq_len, self.layer_idx) if past_key_value is not None else 0, 0)
-        qu = rearrange(qu, "... (h d) -> ... h d", d=self.head_dim)
-        kv = torch.cat([k, v], dim=1)
-        kv = rearrange(kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.head_dim)
-        kv_seq_len = kv.shape[0]
-        seqlen_offset = max(kv_seq_len if kv_cache is not None else 0, 0)
+        # qu, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # qu = rearrange(qu, "... (h d) -> ... h d", d=self.head_dim)
+        # kv = torch.cat([k, v], dim=1)
+        # kv = rearrange(kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.head_dim)
+        # kv_seq_len = kv.shape[0]
+        # seqlen_offset = max(kv_seq_len if kv_cache is not None else 0, 0)
         
-        qu, kv = self.rotary_emb_flash(qu.unsqueeze(0), kv=kv.unsqueeze(0), seqlen_offset=seqlen_offset)
-        k, _ = kv.chunk(2, dim=2)
-        qu = qu.squeeze(0).reshape(kv_seq_len, -1)
-        k = k.squeeze(0).reshape(kv_seq_len, -1)
+        # qu, kv = self.rotary_emb_flash(qu.unsqueeze(0), kv=kv.unsqueeze(0), seqlen_offset=seqlen_offset)
+        # k, _ = kv.chunk(2, dim=2)
+        # qu = qu.squeeze(0).reshape(kv_seq_len, -1)
+        # k = k.squeeze(0).reshape(kv_seq_len, -1)
+        # print (self.layer_idx, kv_seq_len)
         #import pdb;pdb.set_trace()
         ##qu.size = [2048, 4096]
         ##k.size or v.size = [2048, 1024]
