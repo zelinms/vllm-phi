@@ -183,7 +183,7 @@ class PhiMoE(nn.Module):
                                         self.w2s,
                                         router_logits,
                                         self.top_k,
-                                        renormalize=True,
+                                        renormalize=False,
                                         inplace=True,
                                         use_fp8=self.use_fp8,
                                         w1_scale=self.ws_scale,
@@ -204,7 +204,7 @@ class PhiMoEAttention(nn.Module):
                  hidden_size: int,
                  num_heads: int,
                  num_kv_heads: int,
-                 max_position: int = 4096 * 32,
+                 max_position: int = 4096,
                  rope_theta: float = 10000,
                  quant_config: Optional[QuantizationConfig] = None,
                  sliding_window: Optional[int] = None) -> None:
@@ -257,8 +257,9 @@ class PhiMoEAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position,
             base=int(self.rope_theta),
-            is_neox_style=True,
+           # is_neox_style=True,
         )
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -292,7 +293,7 @@ class PhiMoEDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
-        rope_theta = getattr(config, "rope_theta", 10000)
+        rope_theta = 10000.0 #getattr(config, "rope_theta", 10000)
         self.self_attn = PhiMoEAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -301,7 +302,7 @@ class PhiMoEDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             sliding_window=config.sliding_window,
             quant_config=quant_config)
-        
+         
         self.block_sparse_moe = PhiMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
