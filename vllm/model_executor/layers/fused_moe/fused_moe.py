@@ -500,14 +500,14 @@ def fused_moe(
     ]
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
-
+    routing_weights = torch.softmax(gating_output,
+                                    dim=-1,
+                                    dtype=torch.float32)
     if sparse_mixer:
-        topk_weights, topk_ids = sparsemixer(routing_weights, top_k, 0.1, training)
+        topk_weights, topk_ids = sparsemixer(routing_weights, topk, 0.1, training)
     elif is_hip():
         # The MoE kernels are not yet supported on ROCm.
-        routing_weights = torch.softmax(gating_output,
-                                        dim=-1,
-                                        dtype=torch.float32)
+
         topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
     else:
         import vllm._moe_C as moe_kernels

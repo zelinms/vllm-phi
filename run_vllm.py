@@ -14,7 +14,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=200)
 llm = LLM(model="/home/data/transformers_cache/moe-test-phi/204600_hf_bfloat16",
           tokenizer="microsoft/custom_llama2",
         #   trust_remote_code=True,
-          dtype="bfloat16", tensor_parallel_size=2, max_model_len=200)
+          quantization='fp8', tensor_parallel_size=1, max_model_len=200)
 # llm = LLM(model="facebook/opt-125m")
 #llm = LLM(model="mistralai/Mixtral-8x7B-v0.1", tensor_parallel_size=2, max_model_len=200)
 outputs = llm.generate(prompts, sampling_params)

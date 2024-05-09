@@ -51,6 +51,8 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
 
+from einops import rearrange
+from flash_attn.layers.rotary import RotaryEmbedding as FlashRotaryEmbedding
 
 class PhiMoE(nn.Module):
     """A tensor-parallel MoE implementation for PhiMoE that shards each expert
@@ -176,8 +178,6 @@ class PhiMoE(nn.Module):
         hidden_states = hidden_states.view(-1, self.hidden_size)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        #print (self.ws)
-        #import pdb;pdb.set_trace()
         final_hidden_states = fused_moe(hidden_states,
                                         self.ws,
                                         self.w2s,
@@ -185,7 +185,7 @@ class PhiMoE(nn.Module):
                                         self.top_k,
                                         inplace=True,
                                         renormalize=False,
-                                        sparse_mixer=True
+                                        sparse_mixer=True,
                                         use_fp8=self.use_fp8,
                                         w1_scale=self.ws_scale,
                                         w2_scale=self.w2s_scale,
@@ -208,8 +208,10 @@ class PhiMoEAttention(nn.Module):
                  max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
                  quant_config: Optional[QuantizationConfig] = None,
-                 sliding_window: Optional[int] = None) -> None:
+                 sliding_window: Optional[int] = None,
+                 layer_idx: Optional[int] = None) -> None:
         super().__init__()
+        self.layer_idx = layer_idx
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -253,6 +255,14 @@ class PhiMoEAttention(nn.Module):
             bias=True,
             quant_config=quant_config,
         )
+        
+        rotary_cls = FlashRotaryEmbedding
+        rotary_dim = 128
+        rotary_base: float = 10000.0
+        rotary_scale_base = None
+        device = torch.device("cuda")
+        self.rotary_emb_flash = rotary_cls(rotary_dim, base=rotary_base, scale_base=rotary_scale_base, device=device)        
+        
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -268,6 +278,7 @@ class PhiMoEAttention(nn.Module):
             sliding_window=self.sliding_window,
         )
 
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -276,9 +287,27 @@ class PhiMoEAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        qu, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        #qu1, k1, v1 = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        #qu_origin, k_origin = self.rotary_emb(positions, qu1, k1)
+        
+        #import pdb;pdb.set_trace()
+        ## kv_cache is None & past_key_value is a dictionary
+        ## seqlen_offset = max(past_key_value.get_usable_length(kv_seq_len, self.layer_idx) if past_key_value is not None else 0, 0)
+        qu = rearrange(qu, "... (h d) -> ... h d", d=self.head_dim)
+        kv = torch.cat([k, v], dim=1)
+        kv = rearrange(kv, "... (two hkv d) -> ... two hkv d", two=2, d=self.head_dim)
+        kv_seq_len = kv.shape[0]
+        seqlen_offset = max(kv_seq_len if kv_cache is not None else 0, 0)
+        
+        qu, kv = self.rotary_emb_flash(qu.unsqueeze(0), kv=kv.unsqueeze(0), seqlen_offset=seqlen_offset)
+        k, _ = kv.chunk(2, dim=2)
+        qu = qu.squeeze(0).reshape(kv_seq_len, -1)
+        k = k.squeeze(0).reshape(kv_seq_len, -1)
+        #import pdb;pdb.set_trace()
+        ##qu.size = [2048, 4096]
+        ##k.size or v.size = [2048, 1024]
+        attn_output = self.attn(qu, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -289,6 +318,7 @@ class PhiMoEDecoderLayer(nn.Module):
         self,
         config: MixtralConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        layer_idx: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -301,7 +331,8 @@ class PhiMoEDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
             sliding_window=config.sliding_window,
-            quant_config=quant_config)
+            quant_config=quant_config,
+            layer_idx=layer_idx)
         
         self.block_sparse_moe = PhiMoE(
             num_experts=config.num_local_experts,
@@ -370,8 +401,8 @@ class PhiMoEModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            PhiMoEDecoderLayer(config, quant_config=quant_config)
-            for _ in range(config.num_hidden_layers)
+            PhiMoEDecoderLayer(config, quant_config=quant_config, layer_idx=i+1)
+            for i in range(config.num_hidden_layers)
         ])
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps, elementwise_affine=True)
 
