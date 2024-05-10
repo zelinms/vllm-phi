@@ -2,7 +2,7 @@
 import functools
 import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Callable
 
 import torch
 import triton
@@ -321,6 +321,7 @@ def fused_moe(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    routing_func: Callable = torch.topk,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -362,12 +363,14 @@ def fused_moe(
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
 
-    if is_hip():
+    if routing_func != torch.topk:
+        topk_weights, topk_ids = routing_func(gating_output, topk)
+    elif is_hip():
         # The MoE kernels are not yet supported on ROCm.
         routing_weights = torch.softmax(gating_output,
                                         dim=-1,
                                         dtype=torch.float32)
-        topk_weights, topk_ids = torch.topk(routing_weights, topk, dim=-1)
+        topk_weights, topk_ids = routing_func(routing_weights, topk)
     else:
         import vllm._moe_C as moe_kernels
 
@@ -433,6 +436,8 @@ def fused_moe(
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config['BLOCK_SIZE_M'], E)
+    compute_type = (tl.bfloat16
+                    if hidden_states.dtype == torch.bfloat16 else tl.float16)
 
     invoke_fused_moe_kernel(hidden_states,
                             w1,
@@ -447,7 +452,7 @@ def fused_moe(
                             False,
                             topk_ids.shape[1],
                             config,
-                            compute_type=tl.float16,
+                            compute_type=compute_type,
                             use_fp8=use_fp8)
 
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
@@ -465,7 +470,7 @@ def fused_moe(
                             True,
                             1,
                             config,
-                            compute_type=tl.float16,
+                            compute_type=compute_type,
                             use_fp8=use_fp8)
 
     if inplace:
