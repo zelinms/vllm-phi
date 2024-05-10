@@ -341,10 +341,7 @@ class PhiMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
-        # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        #print (self.ws)
-        #import pdb;pdb.set_trace()
         final_hidden_states = fused_moe(hidden_states,
                                         self.ws,
                                         self.w2s,
@@ -495,13 +492,11 @@ class PhiMoEDecoderLayer(nn.Module):
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        # Self Attention
-        # if residual is None:
         residual = hidden_states
+
+        # Self Attention
         hidden_states = self.input_layernorm(hidden_states)
-        # else:
-        #     hidden_states, residual = self.input_layernorm(
-        #         hidden_states, residual)
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -509,6 +504,7 @@ class PhiMoEDecoderLayer(nn.Module):
             attn_metadata=attn_metadata,
         )
         hidden_states = hidden_states + residual
+
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
@@ -614,7 +610,6 @@ class PhiMoEForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
-        print('CODE VERSION: 20240510 22:50')
 
 
     def forward(
