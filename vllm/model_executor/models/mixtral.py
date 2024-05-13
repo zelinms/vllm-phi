@@ -166,7 +166,7 @@ class mp(torch.autograd.Function):
         )
 
 
-def sparsemixer(scores, top_k, jitter_eps=0.1):
+def sparsemixer(scores, top_k, jitter_eps=0.01):
     assert top_k == 2
     
     ################ first expert ################
