@@ -186,9 +186,11 @@ def fused_moe(
 
     if M == 1:
         # expert, hs1, hs2
-        topk_w1 = w1[topk_ids.flatten()]
-        topk_w2 = w2[topk_ids.flatten()]
-        topk_ids = torch.arrange(topk, device=topk_ids.device, dtype=topk_ids.dtype)
+        topk_w1 = w1.view(torch.uint8)[topk_ids.flatten()]
+        topk_w2 = w2.view(torch.uint8)[topk_ids.flatten()]
+        topk_ids = torch.arange(
+            topk, device=topk_ids.device, dtype=topk_ids.dtype
+        ).unsqueeze(0)
 
         E = topk
 
@@ -198,6 +200,12 @@ def fused_moe(
     else:
         w1 = dequantize_fp8(w1, w1_scale, dtype=hidden_states.dtype)
         w2 = dequantize_fp8(w2, w2_scale, dtype=hidden_states.dtype)
+
+    use_fp8 = False
+    w1_scale = None
+    w2_scale = None
+    a1_scale = None
+    a2_scale = None
 
     intermediate_cache1 = torch.empty(
         (M, topk_ids.shape[1], N),
