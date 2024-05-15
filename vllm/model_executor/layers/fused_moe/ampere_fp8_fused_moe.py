@@ -266,6 +266,9 @@ def fused_moe(
         use_fp8=use_fp8,
     )
 
+    del w1
+    del w2
+
     if inplace:
         return torch.sum(
             intermediate_cache3.view(*intermediate_cache3.shape),
