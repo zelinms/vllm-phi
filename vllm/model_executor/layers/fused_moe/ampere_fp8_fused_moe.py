@@ -30,8 +30,9 @@ convert_fp8e4m3_to_half = cupy.RawKernel(
 #include "cuda_fp8.h"
 #include "cuda_fp16.h"
 extern "C" __global__
-void convert_fp8e4m3_to_half(const __nv_fp8_storage_t* x, float scale, half* y, int size) {
+void convert_fp8e4m3_to_half(const __nv_fp8_storage_t* x, float *scale_p, half* y, int size) {
     int tid = blockDim.x * blockIdx.x + threadIdx.x;
+    float scale = *scale_p;
     if (tid < size)
         y[tid] = __nv_cvt_fp8_to_halfraw(x[tid], __NV_E4M3) * scale;
 }
@@ -45,8 +46,9 @@ convert_fp8e4m3_to_bfloat16 = cupy.RawKernel(
 #include "cuda_fp16.h"
 #include "cuda_bf16.h"
 extern "C" __global__
-void convert_fp8e4m3_to_bfloat16(const __nv_fp8_storage_t* x, float scale, __nv_bfloat16* y, int size) {
+void convert_fp8e4m3_to_bfloat16(const __nv_fp8_storage_t* x, float* scale_p, __nv_bfloat16* y, int size) {
     int tid = blockDim.x * blockIdx.x + threadIdx.x;
+    float scale = *scale_p;
     if (tid < size)
         y[tid] = __float2bfloat16(__nv_cvt_fp8_to_halfraw(x[tid], __NV_E4M3) * scale);
 }
@@ -55,19 +57,26 @@ void convert_fp8e4m3_to_bfloat16(const __nv_fp8_storage_t* x, float scale, __nv_
 )
 
 
-def dequantize_fp8(t_fp8, scale, dtype=torch.float16):
+def dequantize_fp8(t_fp8, scales, dtype=torch.float16):
     s = torch.empty_like(t_fp8, dtype=dtype)
-    scale = cupy.float32(scale.item())
     convert = (
         convert_fp8e4m3_to_half
         if dtype == torch.float16
         else convert_fp8e4m3_to_bfloat16
     )
-    convert(
-        ((t_fp8.numel() + 1024 - 1) // 1024,),
-        (1024,),
-        (t_fp8.data_ptr(), scale, s.data_ptr(), t_fp8.numel()),
-    )
+
+    expert_num = t_fp8.shape[0]
+
+    expert_in = torch.chunk(t_fp8, expert_num, dim=0)
+    expert_out = torch.chunk(s, expert_num, dim=0)
+
+    for i in range(expert_num):
+        scale = scales[i]
+        convert(
+            ((expert_in[i].numel() + 1024 - 1) // 1024,),
+            (1024,),
+            (expert_in[i].data_ptr(), scale.data_ptr(), expert_out[i].data_ptr(), t_fp8.numel()),
+        )
     return s
 
 
@@ -194,16 +203,14 @@ def fused_moe(
 
         E = topk
 
+        w1_scale = w1_scale[topk_ids.flatten()]
         w1 = dequantize_fp8(topk_w1, w1_scale, dtype=hidden_states.dtype)
-        w2 = dequantize_fp8(topk_w2, w2_scale, dtype=hidden_states.dtype)
 
     else:
         w1 = dequantize_fp8(w1, w1_scale, dtype=hidden_states.dtype)
-        w2 = dequantize_fp8(w2, w2_scale, dtype=hidden_states.dtype)
 
     use_fp8 = False
     w1_scale = None
-    w2_scale = None
     a1_scale = None
     a2_scale = None
 
@@ -246,6 +253,16 @@ def fused_moe(
         use_fp8=use_fp8,
     )
 
+    del w1
+
+    if M == 1:
+        w2_scale = w2_scale[topk_ids.flatten()]
+        w2 = dequantize_fp8(topk_w2, w2_scale, dtype=hidden_states.dtype)
+    else:
+        w2 = dequantize_fp8(w2, w2_scale, dtype=hidden_states.dtype)
+        
+    w2_scale = None
+
     ops.silu_and_mul(intermediate_cache2, intermediate_cache1.view(-1, N))
 
     invoke_fused_moe_kernel(
@@ -266,7 +283,6 @@ def fused_moe(
         use_fp8=use_fp8,
     )
 
-    del w1
     del w2
 
     if inplace:
