@@ -54,6 +54,16 @@ from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
 
 
+def is_sm80(device_id=0):
+    if not torch.cuda.is_available():
+        return False
+    device_properties = torch.cuda.get_device_properties(device_id)
+    return (device_properties.major == 8 and device_properties.minor == 0)
+
+if is_sm80():
+    from vllm.model_executor.layers.fused_moe import ampere_fp8_fused_moe
+    fused_moe = ampere_fp8_fused_moe.fused_moe
+
 logger = logging.get_logger(__name__)
 
 
@@ -248,6 +258,7 @@ class PhiMoE(nn.Module):
         # FIXME(pcmoritz): Make this more general to support different
         # quantization schemes
         self.use_fp8 = isinstance(quant_config, Fp8Config)
+        assert self.use_fp8, "USE FP8"
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
