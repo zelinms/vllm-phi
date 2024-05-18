@@ -62,8 +62,8 @@ def is_sm80(device_id=0):
 
 if is_sm80():
     from vllm.model_executor.layers.fused_moe import ampere_fp8_fused_moe
-    fused_moe = ampere_fp8_fused_moe.fused_moe
-
+    fused_moe_a100 = ampere_fp8_fused_moe.fused_moe
+    
 logger = logging.get_logger(__name__)
 
 
@@ -258,8 +258,8 @@ class PhiMoE(nn.Module):
         # FIXME(pcmoritz): Make this more general to support different
         # quantization schemes
         self.use_fp8 = isinstance(quant_config, Fp8Config)
-        assert self.use_fp8, "USE FP8"
-
+        self.apply_a100_fp8 = is_sm80() and self.use_fp8
+        
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
@@ -354,19 +354,34 @@ class PhiMoE(nn.Module):
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = fused_moe(hidden_states,
-                                        self.ws,
-                                        self.w2s,
-                                        router_logits,
-                                        self.top_k,
-                                        renormalize=False,
-                                        inplace=True,
-                                        use_fp8=self.use_fp8,
-                                        w1_scale=self.ws_scale,
-                                        w2_scale=self.w2s_scale,
-                                        a1_scale=self.as_scale,
-                                        a2_scale=self.a2s_scale,
-                                        routing_func=sparsemixer)
+        if self.apply_a100_fp8:
+            final_hidden_states = fused_moe_a100(hidden_states,
+                                            self.ws,
+                                            self.w2s,
+                                            router_logits,
+                                            self.top_k,
+                                            renormalize=False,
+                                            inplace=True,
+                                            use_fp8=self.use_fp8,
+                                            w1_scale=self.ws_scale,
+                                            w2_scale=self.w2s_scale,
+                                            a1_scale=self.as_scale,
+                                            a2_scale=self.a2s_scale,
+                                            routing_func=sparsemixer)            
+        else:
+            final_hidden_states = fused_moe(hidden_states,
+                                            self.ws,
+                                            self.w2s,
+                                            router_logits,
+                                            self.top_k,
+                                            renormalize=False,
+                                            inplace=True,
+                                            use_fp8=self.use_fp8,
+                                            w1_scale=self.ws_scale,
+                                            w2_scale=self.w2s_scale,
+                                            a1_scale=self.as_scale,
+                                            a2_scale=self.a2s_scale,
+                                            routing_func=sparsemixer)
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
