@@ -38,7 +38,7 @@ def num_warps(_builder=None):
 
 # This is a hack to put the fp8e4m3 to replace fp8e4b15 in triton
 @core.builtin
-def convert_fp8e4b15_as_fp8e4m3_to_float16(r0, _builder=None):
+def convert_uint8_as_fp8e4m3_to_float16(r0, _builder=None):
     return core.inline_asm_elementwise(
         "{                                      \n"
         ".reg .b32 a<2>, b<2>;                  \n"  # if input = 0xf1f2f3f4
