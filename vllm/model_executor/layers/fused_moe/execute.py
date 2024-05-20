@@ -82,7 +82,7 @@ def moe_perf(
     return all_time / times
 
 
-searchspace = list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
+searchspace = [1] + list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
 #searchspace = [1, 32]
 intermediate_size = 6400
 expert_num = 16
@@ -91,5 +91,5 @@ for tk in searchspace:
     print(
         tk,
         ",",
-        moe_perf(tokens=tk, experts=expert_num, intermediate_size=intermediate_size, use_fp8=False),
+        moe_perf(tokens=tk, experts=expert_num, intermediate_size=intermediate_size, use_fp8=True),
     )

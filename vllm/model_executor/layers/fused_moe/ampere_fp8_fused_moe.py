@@ -158,8 +158,10 @@ def fused_moe_kernel(
             a_ptrs,
             mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0,
-        ).to(tl.float16)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0).to(tl.float16)
+        )
+        a=tl.extra.cuda.convert_fp8e4b15_as_fp8e4m3_to_float16(a)
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        b=tl.extra.cuda.convert_fp8e4b15_as_fp8e4m3_to_float16(b)
         # We accumulate along the K dimension.
         if use_fp8:
             accumulator = tl.dot(a, b, acc=accumulator)
