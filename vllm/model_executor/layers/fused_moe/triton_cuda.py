@@ -49,7 +49,7 @@ def convert_uint8_as_fp8e4m3_to_float16(r0, _builder=None):
         "shr.b32  b0, b0, 1;                    \n"  # b0 >>= 1
         "shr.b32  b1, b1, 1;                    \n"  # shift into fp16 position
         "add.u32  b0, b0, 0x20002000;           \n"  # b0.exp += 2**4-2**3
-        # exponent compensate = 8
+                                                     # exponent compensate = 8
         "add.u32  b1, b1, 0x20002000;           \n"  # b1 += 8<<10 | 8<<10<<16
         "lop3.b32 $0, b0, 0x80008000, a0, 0xf8; \n"  # out0 = b0|(0x80008000&a0)
         "lop3.b32 $1, b1, 0x80008000, a1, 0xf8; \n" # (restore sign)
