@@ -54,7 +54,7 @@ def convert_uint8_as_fp8e4m3_to_float16(r0, _builder=None):
         "lop3.b32 $0, b0, 0x80008000, a0, 0xf8; \n"  # out0 = b0|(0x80008000&a0)
         "lop3.b32 $1, b1, 0x80008000, a1, 0xf8; \n" # (restore sign)
         "}                                      \n",
-        "=r, =r, r",
+        "=r,=r,r",
         [r0],
         dtype=core.float16,
         is_pure=True,
