@@ -3,7 +3,7 @@ import triton
 import triton.language as tl
 import vllm
 from vllm import _custom_ops as ops
-
+import ampere_fp8_fused_moe
 
 @triton.jit
 def cast_kernel(x_ptr,
@@ -21,7 +21,7 @@ def cast_kernel(x_ptr,
 
 
 torch.manual_seed(0)
-size = 1024
+size = 128
 x = torch.rand(size, device='cuda') - 0.5
 xs, s = ops.scaled_fp8_quant(x)
 xs = triton.reinterpret(xs, tl.float8e4b15)
@@ -31,5 +31,4 @@ grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
 cast_kernel[grid](xs, output, n_elements, BLOCK_SIZE=1024)
 
 print(x, s)
-print(output)
 print(output*s)
