@@ -161,10 +161,10 @@ def fused_moe_kernel(
         ).to(tl.float16)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0).to(tl.float16)
         # We accumulate along the K dimension.
-        #if use_fp8:
-        #    accumulator = tl.dot(a, b, acc=accumulator)
-        #else:
-        accumulator += tl.dot(a, b)
+        if use_fp8:
+            accumulator = tl.dot(a, b, acc=accumulator)
+        else:
+            accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
