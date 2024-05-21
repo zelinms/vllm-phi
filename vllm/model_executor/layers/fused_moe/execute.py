@@ -83,7 +83,7 @@ def moe_perf(
 
 
 searchspace = [1] + list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
-#searchspace = [1, 32]
+#searchspace = [1, 4096]
 intermediate_size = 6400
 expert_num = 16
 

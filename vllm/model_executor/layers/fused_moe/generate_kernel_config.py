@@ -18,7 +18,7 @@ def read_json_files(directory):
                 with open(filepath, "r") as file:
                     data = json.load(file)
 
-                    if data["time"] < 1.5:
+                    if data["time"] < 0.01:
                         continue
 
                     kstr = f"E={data['expert_num']},N={data['intermediate_size']},device_name={device_name}.json"

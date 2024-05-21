@@ -140,7 +140,7 @@ def fused_moe_kernel(
     )
 
     if use_fp8:
-        a_scale = tl.load(a_scale_ptr)
+        #a_scale = tl.load(a_scale_ptr)
         b_scale = tl.load(b_scale_ptr + off_experts)
 
     # -----------------------------------------------------------
@@ -175,7 +175,7 @@ def fused_moe_kernel(
         accumulator = accumulator * moe_weight[:, None]
 
     if use_fp8:
-        accumulator = (accumulator * a_scale * b_scale).to(compute_type)
+        accumulator = (accumulator * b_scale).to(compute_type)
     else:
         accumulator = accumulator.to(compute_type)
     # -----------------------------------------------------------

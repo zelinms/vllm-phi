@@ -91,7 +91,7 @@ def invoke_profiling(
 
     try:
         result = subprocess.run(
-            ["python", "profile_fused_moe.py"],
+            ["python", "profile_kernel.py"],
             input=args_str,
             capture_output=True,
             text=True,
@@ -178,7 +178,7 @@ for tokens in searchspace:
     def remove_elements(lst):
         import random
         random.seed(1234)
-        num_to_remove = int(len(lst) * 0.9)
+        num_to_remove = int(len(lst) * 0.75)
         indices_to_remove = random.sample(range(len(lst)), num_to_remove)
         new_lst = [item for idx, item in enumerate(lst) if idx not in indices_to_remove]
         return new_lst
