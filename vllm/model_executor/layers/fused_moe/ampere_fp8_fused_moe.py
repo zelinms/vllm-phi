@@ -157,7 +157,7 @@ def fused_moe_kernel(
             a_ptrs,
             mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0,
-        )
+        ).to(tl.float16)
         #a = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(a)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
         b = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(b)
