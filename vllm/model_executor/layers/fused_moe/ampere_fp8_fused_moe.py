@@ -31,7 +31,7 @@ def replace_triton_cuda():
     cur_folder_cuda_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'triton_cuda.py')
     target_folder_cuda_py = os.path.join(get_package_path('triton'), 'triton', 'language', 'extra', 'cuda.py')
     shutil.copyfile(cur_folder_cuda_py, target_folder_cuda_py)
-    
+
 
 replace_triton_cuda()
 
@@ -132,7 +132,6 @@ def fused_moe_kernel(
         offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
     )
 
-
     off_experts = tl.load(expert_ids_ptr + pid_m)
     b_ptrs = (
         b_ptr
@@ -159,9 +158,9 @@ def fused_moe_kernel(
             mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0,
         )
-        a=tl.extra.cuda.convert_fp8e4b15_as_fp8e4m3_to_float16(a)
+        a = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(a)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        b=tl.extra.cuda.convert_fp8e4b15_as_fp8e4m3_to_float16(b)
+        b = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(b)
         # We accumulate along the K dimension.
         if use_fp8:
             accumulator = tl.dot(a, b, acc=accumulator)
@@ -269,8 +268,8 @@ def invoke_fused_moe_kernel(
     else:
         A, A_scale = ops.scaled_fp8_quant(A, A_scale)
         assert B_scale is not None
-        A = triton.reinterpret(A, tl.float8e4b15)
-        B = triton.reinterpret(B, tl.float8e4b15)
+        A = triton.reinterpret(A, tl.uint8)
+        B = triton.reinterpret(B, tl.uint8)
 
     grid = lambda META: (
         triton.cdiv(sorted_token_ids.shape[0], META["BLOCK_SIZE_M"])
