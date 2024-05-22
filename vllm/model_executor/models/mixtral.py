@@ -359,8 +359,8 @@ class PhiMoE(nn.Module):
                 tensor[subnormal_mask] = 0
                 return subnormal_mask.any()
 
-            remove_subnormal_fp8(ws.view(torch.uint8))
-            remove_subnormal_fp8(w2s.view(torch.uint8))
+            #remove_subnormal_fp8(ws.view(torch.uint8))
+            #remove_subnormal_fp8(w2s.view(torch.uint8))
 
             self.ws = nn.Parameter(ws.to("cuda"), requires_grad=False)
             self.w2s = nn.Parameter(w2s.to("cuda"), requires_grad=False)
