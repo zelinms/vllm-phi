@@ -140,7 +140,7 @@ def fused_moe_kernel(
     )
 
     if use_fp8:
-        # a_scale = tl.load(a_scale_ptr)
+        a_scale = tl.load(a_scale_ptr)
         b_scale = tl.load(b_scale_ptr + off_experts)
 
     # -----------------------------------------------------------
@@ -158,10 +158,14 @@ def fused_moe_kernel(
             mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0,
         )
+        a = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(a)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_bfloat16(b)
+        b = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(b)
         # We accumulate along the K dimension.
-        accumulator += tl.dot(a, b)
+        if use_fp8:
+            accumulator = tl.dot(a, b, acc=accumulator)
+        else:
+            accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -171,7 +175,7 @@ def fused_moe_kernel(
         accumulator = accumulator * moe_weight[:, None]
 
     if use_fp8:
-        accumulator = (accumulator * b_scale).to(compute_type)
+        accumulator = (accumulator * a_scale * b_scale).to(compute_type)
     else:
         accumulator = accumulator.to(compute_type)
     # -----------------------------------------------------------
@@ -259,13 +263,14 @@ def invoke_fused_moe_kernel(
     assert sorted_token_ids.stride(0) == 1
 
     if not use_fp8:
-        #assert A_scale is None
+        assert A_scale is None
         assert B_scale is None
     else:
-        #A, A_scale = ops.scaled_fp8_quant(A, A_scale)
+        A, A_scale = ops.scaled_fp8_quant(A, A_scale)
         assert B_scale is not None
-        #A = triton.reinterpret(A, tl.uint8)
-        B = triton.reinterpret(B, tl.uint8)
+    
+    A = triton.reinterpret(A, dtype=tl.uint8) if use_fp8 else A
+    B = triton.reinterpret(B, dtype=tl.uint8) if use_fp8 else B
 
     grid = lambda META: (
         triton.cdiv(sorted_token_ids.shape[0], META["BLOCK_SIZE_M"])
@@ -320,7 +325,7 @@ def get_moe_configs(E: int, N: int, dtype: Optional[str]) -> Optional[Dict[int, 
 
     # First look up if an optimized configuration is available in the configs
     # directory
-    json_file_name = "E=16,N=6400,device_name=NVIDIA_A100_80GB_PCIe.json"
+    json_file_name = get_config_file_name(E, N, dtype)
 
     config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name
@@ -388,8 +393,6 @@ def fused_moe(
     assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
-
-    assert hidden_states.dtype == torch.bfloat16
 
     if routing_func != torch.topk:
         topk_weights, topk_ids = routing_func(gating_output, topk)
