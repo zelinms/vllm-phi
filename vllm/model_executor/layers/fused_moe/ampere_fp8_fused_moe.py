@@ -140,7 +140,7 @@ def fused_moe_kernel(
     )
 
     if use_fp8:
-        a_scale = tl.load(a_scale_ptr)
+        #a_scale = tl.load(a_scale_ptr)
         b_scale = tl.load(b_scale_ptr + off_experts)
 
     # -----------------------------------------------------------
@@ -157,10 +157,10 @@ def fused_moe_kernel(
             a_ptrs,
             mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0,
-        )
-        a = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(a)
+        ).to(tl.float16)
+        #a = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(a)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(b)
+        b = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(b) * b_scale.to(tl.float16)
         # We accumulate along the K dimension.
         if use_fp8:
             accumulator = tl.dot(a, b, acc=accumulator)
@@ -175,7 +175,7 @@ def fused_moe_kernel(
         accumulator = accumulator * moe_weight[:, None]
 
     if use_fp8:
-        accumulator = (accumulator * a_scale * b_scale).to(compute_type)
+        accumulator = accumulator.to(compute_type)
     else:
         accumulator = accumulator.to(compute_type)
     # -----------------------------------------------------------
@@ -266,10 +266,10 @@ def invoke_fused_moe_kernel(
         assert A_scale is None
         assert B_scale is None
     else:
-        A, A_scale = ops.scaled_fp8_quant(A, A_scale)
+        #A, A_scale = ops.scaled_fp8_quant(A, A_scale)
         assert B_scale is not None
     
-    A = triton.reinterpret(A, dtype=tl.uint8) if use_fp8 else A
+    #A = triton.reinterpret(A, dtype=tl.uint8) if use_fp8 else A
     B = triton.reinterpret(B, dtype=tl.uint8) if use_fp8 else B
 
     grid = lambda META: (
