@@ -140,7 +140,7 @@ def fused_moe_kernel(
     )
 
     if use_fp8:
-        #a_scale = tl.load(a_scale_ptr)
+        # a_scale = tl.load(a_scale_ptr)
         b_scale = tl.load(b_scale_ptr + off_experts)
 
     # -----------------------------------------------------------
@@ -157,10 +157,9 @@ def fused_moe_kernel(
             a_ptrs,
             mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0,
-        ).to(tl.float16)
-        #a = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(a)
+        )
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(b)
+        b = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_bfloat16(b)
         # We accumulate along the K dimension.
         if use_fp8:
             accumulator = tl.dot(a, b, acc=accumulator)
@@ -392,6 +391,8 @@ def fused_moe(
     assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
+
+    assert hidden_states.dtype == torch.bfloat16
 
     if routing_func != torch.topk:
         topk_weights, topk_ids = routing_func(gating_output, topk)

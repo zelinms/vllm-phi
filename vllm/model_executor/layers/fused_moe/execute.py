@@ -26,7 +26,7 @@ def moe_perf(
 ):
     torch.manual_seed(0)
 
-    hidden_state = torch.randn(tokens, hidden_size).cuda().half()
+    hidden_state = torch.randn(tokens, hidden_size).cuda().bfloat16()
 
 
     if use_fp8:
@@ -48,7 +48,7 @@ def moe_perf(
 
 
     gatew = torch.randn(hidden_size, experts).cuda().half()
-    gating_output = torch.matmul(hidden_state, gatew).float()
+    gating_output = torch.matmul(hidden_state.half(), gatew).float()
 
     all_time = 0.0
     for j in range(10 + times):
