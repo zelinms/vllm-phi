@@ -7,11 +7,8 @@ import sys
 import os
 import shutil
 
-# pip install cupy-cuda12x
-
-import cupy
 import fused_moe
-import ampere_fp8_fused_moe
+import ampere_fp8_v2_fused_moe
 
 
 def moe_perf(
@@ -28,7 +25,6 @@ def moe_perf(
 
     hidden_state = torch.randn(tokens, hidden_size).cuda().bfloat16()
 
-
     if use_fp8:
         w1, ws_scale = ops.scaled_fp8_quant(
             torch.randn(experts, intermediate_size * topk, hidden_size).cuda().half()
@@ -40,12 +36,11 @@ def moe_perf(
         ws_scale = torch.ones(experts, dtype=ws_scale.dtype, device=ws_scale.device)
         w2s_scale = torch.ones(experts, dtype=ws_scale.dtype, device=ws_scale.device)
     else:
-        w1 = torch.randn(experts, intermediate_size * topk, hidden_size).cuda().half()
-        w2 = torch.randn(experts, hidden_size, intermediate_size).cuda().half()
+        w1 = torch.randn(experts, intermediate_size * topk, hidden_size).cuda().bfloat16()
+        w2 = torch.randn(experts, hidden_size, intermediate_size).cuda().bfloat16()
         h_scale = None
         ws_scale = None
         w2s_scale = None
-
 
     gatew = torch.randn(hidden_size, experts).cuda().half()
     gating_output = torch.matmul(hidden_state.half(), gatew).float()
@@ -56,7 +51,7 @@ def moe_perf(
         end = torch.cuda.Event(enable_timing=True)
         start.record()
 
-        ampere_fp8_fused_moe.fused_moe(
+        ampere_fp8_v2_fused_moe.fused_moe(
             hidden_states=hidden_state,
             w1=w1,
             w2=w2,
@@ -83,7 +78,7 @@ def moe_perf(
 
 
 searchspace = [1] + list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
-#searchspace = [1, 4096]
+#searchspace = [4096]
 intermediate_size = 6400
 expert_num = 16
 
