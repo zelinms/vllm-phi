@@ -25,11 +25,8 @@ def replace_triton_cuda():
 
     def get_package_version(package_name):
         return pkg_resources.get_distribution(package_name).version
-
-    assert (
-        get_package_version("triton") == "2.3.0"
-        or get_package_version("triton") == "2.2.0"
-    )
+    
+    assert get_package_version('triton') == "2.3.0" or get_package_version('triton') == "2.2.0"
 
     cur_folder_cuda_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'triton_cuda.py')
     target_folder_cuda_py = os.path.join(get_package_path('triton'), 'triton', 'language', 'extra', 'cuda.py')
@@ -142,7 +139,9 @@ def fused_moe_kernel(
         + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
     )
 
-    b_scale = tl.load(b_scale_ptr + off_experts)
+    if use_fp8:
+        #a_scale = tl.load(a_scale_ptr)
+        b_scale = tl.load(b_scale_ptr + off_experts)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -158,23 +157,27 @@ def fused_moe_kernel(
             a_ptrs,
             mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0,
-        )#.to(tl.float16)
-        #a = tl.zeros([BLOCK_SIZE_M, BLOCK_SIZE_K], dtype=tl.float16)
+        ).to(tl.float16)
+        #a = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(a)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        #b = tl.zeros([BLOCK_SIZE_K, BLOCK_SIZE_N], dtype=tl.bfloat16)
-        b = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_bfloat16(b)
+        b = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(b) * b_scale.to(tl.float16)
         # We accumulate along the K dimension.
-        accumulator = tl.dot(a, b, acc=accumulator)
+        if use_fp8:
+            accumulator = tl.dot(a, b, acc=accumulator)
+        else:
+            accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
-        #a_ptrs += BLOCK_SIZE_K * stride_ak
+        a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
         accumulator = accumulator * moe_weight[:, None]
 
-    accumulator = accumulator.to(compute_type) * b_scale
-
+    if use_fp8:
+        accumulator = accumulator.to(compute_type)
+    else:
+        accumulator = accumulator.to(compute_type)
     # -----------------------------------------------------------
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -392,6 +395,8 @@ def fused_moe(
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
 
+    new_hidden_states = hidden_states.to(torch.float16)
+
     if routing_func != torch.topk:
         topk_weights, topk_ids = routing_func(gating_output, topk)
     elif is_hip():
@@ -444,40 +449,30 @@ def fused_moe(
                     "BLOCK_SIZE_K": 64,
                     "GROUP_SIZE_M": 1,
                 }
-        
-        config = {
-            "BLOCK_SIZE_M": 128,
-            "BLOCK_SIZE_N": 128,
-            "BLOCK_SIZE_K": 64,
-            "GROUP_SIZE_M": 1,
-            "num_warps": 4,
-            "num_stages": 4
-        }
 
     intermediate_cache1 = torch.empty(
         (M, topk_ids.shape[1], N),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
+        device=new_hidden_states.device,
+        dtype=new_hidden_states.dtype,
     )
     intermediate_cache2 = torch.empty(
         (M * topk_ids.shape[1], N // 2),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
+        device=new_hidden_states.device,
+        dtype=new_hidden_states.dtype,
     )
     intermediate_cache3 = torch.empty(
         (M, topk_ids.shape[1], w2.shape[1]),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
+        device=new_hidden_states.device,
+        dtype=new_hidden_states.dtype,
     )
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config["BLOCK_SIZE_M"], E
     )
-
-    compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
+    compute_type = tl.bfloat16 if new_hidden_states.dtype == torch.bfloat16 else tl.float16
 
     invoke_fused_moe_kernel(
-        hidden_states,
+        new_hidden_states,
         w1,
         intermediate_cache1,
         a1_scale,

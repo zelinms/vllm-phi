@@ -51,7 +51,7 @@ def moe_perf(
         end = torch.cuda.Event(enable_timing=True)
         start.record()
 
-        ampere_fp8_v2_fused_moe.fused_moe(
+        fused_moe.fused_moe(
             hidden_states=hidden_state,
             w1=w1,
             w2=w2,
@@ -77,8 +77,8 @@ def moe_perf(
     return all_time / times
 
 
-searchspace = [1] + list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
-#searchspace = [4096]
+# searchspace = [1] + list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
+searchspace = [1, 4096]
 intermediate_size = 6400
 expert_num = 16
 
@@ -86,5 +86,5 @@ for tk in searchspace:
     print(
         tk,
         ",",
-        moe_perf(tokens=tk, experts=expert_num, intermediate_size=intermediate_size, use_fp8=True),
+        moe_perf(tokens=tk, experts=expert_num, intermediate_size=intermediate_size, use_fp8=False),
     )
