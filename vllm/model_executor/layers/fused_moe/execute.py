@@ -35,12 +35,14 @@ def moe_perf(
         _, h_scale = ops.scaled_fp8_quant(hidden_state)
         ws_scale = torch.ones(experts, dtype=ws_scale.dtype, device=ws_scale.device)
         w2s_scale = torch.ones(experts, dtype=ws_scale.dtype, device=ws_scale.device)
+        fused_moe_f = ampere_fp8_v2_fused_moe.fused_moe
     else:
         w1 = torch.randn(experts, intermediate_size * topk, hidden_size).cuda().bfloat16()
         w2 = torch.randn(experts, hidden_size, intermediate_size).cuda().bfloat16()
         h_scale = None
         ws_scale = None
         w2s_scale = None
+        fused_moe_f = fused_moe.fused_moe
 
     gatew = torch.randn(hidden_size, experts).cuda().half()
     gating_output = torch.matmul(hidden_state.half(), gatew).float()
@@ -51,7 +53,7 @@ def moe_perf(
         end = torch.cuda.Event(enable_timing=True)
         start.record()
 
-        fused_moe.fused_moe(
+        fused_moe_f(
             hidden_states=hidden_state,
             w1=w1,
             w2=w2,
@@ -77,8 +79,8 @@ def moe_perf(
     return all_time / times
 
 
-# searchspace = [1] + list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
-searchspace = [1, 4096]
+searchspace = [1] + list(range(0, 256, 32))[1:] + list(range(256, 4097, 256))
+#searchspace = [1, 4096]
 intermediate_size = 6400
 expert_num = 16
 
