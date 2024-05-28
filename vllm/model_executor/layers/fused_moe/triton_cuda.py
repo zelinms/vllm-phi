@@ -63,6 +63,8 @@ def convert_uint8_as_fp8e4m3_to_float16(r0, _builder=None):
         _builder=_builder,
     )
 
+    
+
 # WARN: subnormal (0bs0000xxx) are not handled
 @core.builtin
 def convert_uint8_as_fp8e4m3_to_bfloat16(r0, _builder=None):

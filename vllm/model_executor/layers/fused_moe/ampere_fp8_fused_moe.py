@@ -26,7 +26,7 @@ def replace_triton_cuda():
     def get_package_version(package_name):
         return pkg_resources.get_distribution(package_name).version
     
-    assert get_package_version('triton') == "2.2.0"
+    assert get_package_version('triton') == "2.3.0" or get_package_version('triton') == "2.2.0"
 
     cur_folder_cuda_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'triton_cuda.py')
     target_folder_cuda_py = os.path.join(get_package_path('triton'), 'triton', 'language', 'extra', 'cuda.py')
@@ -395,6 +395,8 @@ def fused_moe(
     M, _ = hidden_states.shape
     E, N, _ = w1.shape
 
+    new_hidden_states = hidden_states.to(torch.float16)
+
     if routing_func != torch.topk:
         topk_weights, topk_ids = routing_func(gating_output, topk)
     elif is_hip():
@@ -450,27 +452,27 @@ def fused_moe(
 
     intermediate_cache1 = torch.empty(
         (M, topk_ids.shape[1], N),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
+        device=new_hidden_states.device,
+        dtype=new_hidden_states.dtype,
     )
     intermediate_cache2 = torch.empty(
         (M * topk_ids.shape[1], N // 2),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
+        device=new_hidden_states.device,
+        dtype=new_hidden_states.dtype,
     )
     intermediate_cache3 = torch.empty(
         (M, topk_ids.shape[1], w2.shape[1]),
-        device=hidden_states.device,
-        dtype=hidden_states.dtype,
+        device=new_hidden_states.device,
+        dtype=new_hidden_states.dtype,
     )
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
         topk_ids, config["BLOCK_SIZE_M"], E
     )
-    compute_type = tl.bfloat16 if hidden_states.dtype == torch.bfloat16 else tl.float16
+    compute_type = tl.bfloat16 if new_hidden_states.dtype == torch.bfloat16 else tl.float16
 
     invoke_fused_moe_kernel(
-        hidden_states,
+        new_hidden_states,
         w1,
         intermediate_cache1,
         a1_scale,
@@ -513,4 +515,4 @@ def fused_moe(
             dim=1,
             out=hidden_states,
         )
-    return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape), dim=1)
+    return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape), dim=1).to(torch.bfloat16)
