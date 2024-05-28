@@ -452,6 +452,7 @@ class PhiMoEAttention(nn.Module):
             max_position=max_position,
             base=int(self.rope_theta),
             is_neox_style=True,
+            rope_scaling=getattr(config, 'rope_scaling', None),
         )
 
         self.attn = Attention(
