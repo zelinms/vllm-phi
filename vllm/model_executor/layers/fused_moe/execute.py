@@ -88,5 +88,5 @@ for tk in searchspace:
     print(
         tk,
         ",",
-        moe_perf(tokens=tk, experts=expert_num, intermediate_size=intermediate_size, use_fp8=False),
+        moe_perf(tokens=tk, experts=expert_num, intermediate_size=intermediate_size, use_fp8=True),
     )
