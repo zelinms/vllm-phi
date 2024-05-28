@@ -8,7 +8,7 @@ import os
 import shutil
 
 import fused_moe
-import ampere_fp8_v2_fused_moe
+import ampere_fp8_fused_moe
 
 
 def moe_perf(
