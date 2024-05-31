@@ -138,6 +138,8 @@ def fused_moe_kernel(
         ).to(tl.float16)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
 
+        # todo(wenxh): there is a bug in triton 2.2/2.3 that only "=l" works, "=r"
+        # will result error in llvm check(low level bug).
         b = tl.inline_asm_elementwise(
                    asm =  "{                                      \n"
                     ".reg .b32 a<2>, b<2>;                  \n"  # if input = 0xf1f2f3f4
