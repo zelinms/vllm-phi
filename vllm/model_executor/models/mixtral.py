@@ -347,9 +347,24 @@ class PhiMoE(nn.Module):
                 w2s[expert, :, :], self.w2s_scale[
                     expert] = ops.scaled_fp8_quant(self.w2s.data[expert, :, :])
 
+            def remove_subnormal_fp8(tensor):
+                assert tensor.dtype == torch.uint8, "Tensor must be a byte tensor representing fp8 values"
+                exponent_mask = 0b11111000
+                mantissa_mask = 0b00000111
+                exponents = (tensor & exponent_mask) >> 3
+                mantissas = tensor & mantissa_mask
+                subnormal_mask = (exponents == 0) & (mantissas != 0)
+                if subnormal_mask.any():
+                    print(subnormal_mask.sum().item() / subnormal_mask.numel() * 100, "% of values are subnormal")
+                tensor[subnormal_mask] = 0
+                return subnormal_mask.any()
+
+            #remove_subnormal_fp8(ws.view(torch.uint8))
+            #remove_subnormal_fp8(w2s.view(torch.uint8))
+
             self.ws = nn.Parameter(ws.to("cuda"), requires_grad=False)
             self.w2s = nn.Parameter(w2s.to("cuda"), requires_grad=False)
-            
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
