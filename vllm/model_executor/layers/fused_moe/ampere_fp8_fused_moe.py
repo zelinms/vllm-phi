@@ -119,7 +119,6 @@ def fused_moe_kernel(
     )
 
     if use_fp8:
-        # a_scale = tl.load(a_scale_ptr)
         b_scale = tl.load(b_scale_ptr + off_experts)
 
     # -----------------------------------------------------------
@@ -137,7 +136,6 @@ def fused_moe_kernel(
             mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
             other=0.0,
         ).to(tl.float16)
-        # a = tl.extra.cuda.convert_uint8_as_fp8e4m3_to_float16(a)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
 
         b = tl.inline_asm_elementwise(
