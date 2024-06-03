@@ -71,7 +71,6 @@ class MixtralConfig(PretrainedConfig):
 
     model_type = "mixtral"
     keys_to_ignore_at_inference = ["past_key_values"]
-    print ("It comes here? makeing sure it use this configs!!!!!!!!!!!!!")
     def __init__(
         self,
         vocab_size=32000,
@@ -127,7 +126,6 @@ class MixtralConfig(PretrainedConfig):
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
         self.router_jitter_noise = router_jitter_noise
-        print ("makeing sure it use this configs!!!!!!!!!!!!!")
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
@@ -257,7 +255,7 @@ class PhiMoE(nn.Module):
         self.intermediate_size = intermediate_size // self.tp_size
         # FIXME(pcmoritz): Make this more general to support different
         # quantization schemes
-        self.use_fp8 = isinstance(quant_config, Fp8Config)
+        self.use_fp8 = True #isinstance(quant_config, Fp8Config)
         self.apply_a100_fp8 = is_sm80() and self.use_fp8
         
         if params_dtype is None:
@@ -305,7 +303,7 @@ class PhiMoE(nn.Module):
 
         # Scaling factors for FP8 activations
         need_act_scales = (self.use_fp8
-                           and quant_config.activation_scheme == "static")
+                           and False)
         self.as_scale = nn.Parameter(
             torch.zeros(1, device="cuda", dtype=torch.float32),
             requires_grad=False) if need_act_scales else None
