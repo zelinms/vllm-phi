@@ -111,13 +111,21 @@
         "num_warps": 8,
         "num_stages": 4
     },
-    "16": {
+    "7": {
         "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 32,
         "BLOCK_SIZE_K": 64,
         "GROUP_SIZE_M": 1
     },
-    "17": {
+    "8": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 4,
+        "num_stages": 4
+    },
+    "32": {
         "BLOCK_SIZE_M": 64,
         "BLOCK_SIZE_N": 64,
         "BLOCK_SIZE_K": 32,
