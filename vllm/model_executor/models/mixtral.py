@@ -52,7 +52,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import SamplerOutput
 from vllm.utils import print_warning_once
-
+import os
 
 def is_sm80(device_id=0):
     if not torch.cuda.is_available():
@@ -254,8 +254,8 @@ class PhiMoE(nn.Module):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
         # FIXME(pcmoritz): Make this more general to support different
-        # quantization schemes
-        self.use_fp8 = True #isinstance(quant_config, Fp8Config)
+        # quantization 
+        self.use_fp8 = os.environ.get("FP8_ENABLE", "False").lower() in ("true", "1", "t")
         self.apply_a100_fp8 = is_sm80() and self.use_fp8
         
         if params_dtype is None:
