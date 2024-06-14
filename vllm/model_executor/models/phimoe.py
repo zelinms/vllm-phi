@@ -3,11 +3,9 @@
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+# Copyright 2024 Microsoft team. All rights reserved.
 #
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
+# This code is modified based on mixtral.py
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -68,9 +66,9 @@ if is_sm80():
 logger = logging.get_logger(__name__)
 
 
-class MixtralConfig(PretrainedConfig):
+class PhiMoEConfig(PretrainedConfig):
 
-    model_type = "mixtral"
+    model_type = "phimoe"
     keys_to_ignore_at_inference = ["past_key_values"]
     def __init__(
         self,
@@ -135,94 +133,45 @@ class MixtralConfig(PretrainedConfig):
             **kwargs,
         )
 
-
-class mp(torch.autograd.Function):
-
-    @staticmethod
-    def forward(
-        ctx, 
-        scores: torch.Tensor, 
-        multiplier: torch.Tensor, 
-        selected_experts: torch.Tensor,
-        masked_gates: torch.Tensor,
-        mask_for_one: torch.Tensor,
-    ):
-        ctx.save_for_backward(multiplier, selected_experts, masked_gates)
-        return multiplier * mask_for_one
- 
-    @staticmethod
-    def backward(
-        ctx, 
-        grad_at_output: torch.Tensor, 
-    ):
-        multiplier, selected_experts, masked_gates = ctx.saved_tensors
-
-        grad_at_output = grad_at_output * multiplier
-
-        grad_at_scores_expaned = masked_gates * grad_at_output.mul(-1)
-        grad_at_scores_expaned.scatter_add_(
-            dim=-1,
-            index=selected_experts,
-            src=grad_at_output,
-        )
-
-        return (
-            grad_at_scores_expaned, 
-            None, 
-            None, 
-            None, 
-            None, 
-        )
-
-
-def sparsemixer(scores, top_k, jitter_eps=0.01):
+def sparsemixer(scores, top_k, jitter_eps=0.1):
     assert top_k == 2
-    
-    ################ first expert ################
-    
-    with torch.no_grad():
-        # compute mask for sparsity
-        mask_logits_threshold, max_ind = scores.max(dim=-1, keepdim=True)
-        factor = scores.abs().clamp(min=mask_logits_threshold)
-        mask_logits_threshold = (
-            (mask_logits_threshold - scores) / factor
-        ) > (2 * jitter_eps)
 
-    # apply mask 
-    masked_gates = scores.masked_fill(mask_logits_threshold, float('-inf'))
-    selected_experts = max_ind
-        
-    # compute scores for gradients
-    masked_gates = torch.softmax(masked_gates, dim=-1)
-    multiplier_o = masked_gates.gather(dim=-1, index=selected_experts)
+    ################ routing ################
 
-    multiplier = multiplier_o
+    mask_logits_threshold, selected_experts = torch.topk(scores, 2)
 
-    # masked out first expert 
-    masked_scores = torch.scatter(
-        scores,
-        -1,
-        selected_experts,
-        float('-inf'),
-    )
-    with torch.no_grad():
-        # compute mask for sparsity
-        mask_logits_threshold, max_ind = masked_scores.max(dim=-1, keepdim=True)
-        factor = scores.abs().clamp(min=mask_logits_threshold)
-        mask_logits_threshold = (
-            (mask_logits_threshold - scores) / factor
-        ) > (2 * jitter_eps)
+    ################ first expert gating ################
 
-    # apply mask 
-    masked_gates_top2 = masked_scores.masked_fill(mask_logits_threshold, float('-inf'))
-    selected_experts_top2 = max_ind
-    # compute scores for gradients
-    masked_gates_top2 = torch.softmax(masked_gates_top2, dim=-1)
-    multiplier_top2 = masked_gates_top2.gather(dim=-1, index=selected_experts_top2)
+    mask_logits_threshold_1 = mask_logits_threshold[:, 0].unsqueeze(-1)
 
-    multiplier = torch.concat((multiplier, multiplier_top2), dim=-1)
-    selected_experts = torch.concat((selected_experts, selected_experts_top2), dim=-1)
-    
+    factor = scores.abs().clamp(min=mask_logits_threshold_1)
+    logits_mask = (
+        (mask_logits_threshold_1 - scores) / factor
+    ) > (2 * jitter_eps)
+
+    multiplier_1 = torch.softmax(
+      scores.masked_fill(logits_mask, float('-inf')), dim=-1
+    ).gather(dim=-1, index=selected_experts[:, 0].unsqueeze(-1))
+
+    ################ second expert gating ################
+
+    mask_logits_threshold_2 = mask_logits_threshold[:, 1].unsqueeze(-1)
+
+    factor = scores.abs().clamp(min=mask_logits_threshold_2)
+    logits_mask = (
+        (mask_logits_threshold_2 - scores) / factor
+    ) > (2 * jitter_eps)
+
+    multiplier_2 = torch.softmax(
+      torch.scatter(
+        scores, -1, selected_experts[:, 0].unsqueeze(-1), float('-inf')
+      ).masked_fill(
+        logits_mask, float('-inf')
+      ), 
+      dim=-1
+    ).gather(dim=-1, index=selected_experts[:, 1].unsqueeze(-1))
+
+    multiplier = torch.concat((multiplier_1, multiplier_2), dim=-1)
     return (
         multiplier, 
         selected_experts,
@@ -365,6 +314,7 @@ class PhiMoE(nn.Module):
             self.w2s = nn.Parameter(w2s.to("cuda"), requires_grad=False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert False == self.training
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         router_logits, _ = self.gate(hidden_states)
@@ -407,7 +357,7 @@ class PhiMoE(nn.Module):
 class PhiMoEAttention(nn.Module):
 
     def __init__(self,
-                 config: MixtralConfig,
+                 config: PhiMoEConfig,
                  hidden_size: int,
                  num_heads: int,
                  num_kv_heads: int,
@@ -496,7 +446,7 @@ class PhiMoEDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: MixtralConfig,
+        config: PhiMoEConfig,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -561,7 +511,7 @@ class PhiMoEModel(nn.Module):
 
     def __init__(
         self,
-        config: MixtralConfig,
+        config: PhiMoEConfig,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
@@ -601,7 +551,7 @@ class PhiMoEModel(nn.Module):
         return hidden_states
 
 
-class MixtralForCausalLM(nn.Module):
+class PhiMoEForCausalLM(nn.Module):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -627,7 +577,7 @@ class MixtralForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: MixtralConfig,
+        config: PhiMoEConfig,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
