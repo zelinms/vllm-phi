@@ -12,6 +12,7 @@ xformers == 0.0.25  # Requires PyTorch 2.2.1
 gitpython
 pytest
 loguru
-# In case of invalide url, please install from this file:
-#   pip install gitpython pytest loguru vllm/model_executor/layers/fused_moe/pycublas.zip
-git+https://github.com/wenxcs/pycublas.git@moe-group-gemm
+# In case of invalid url, please install from this file:
+#   pip install gitpython pytest loguru && pip install vllm/model_executor/layers/fused_moe/pycublas.zip
+# or 
+#   pip install gitpython pytest loguru && pip install git+https://github.com/wenxcs/pycublas.git@moe-group-gemm
