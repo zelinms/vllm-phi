@@ -8,11 +8,4 @@ vllm-nccl-cu12>=2.18,<2.19  # for downloading nccl library
 torch == 2.2.1
 xformers == 0.0.25  # Requires PyTorch 2.2.1
 
-# Dependencies for pycublas-moe-groupe-gemm
-gitpython
-pytest
-loguru
-# In case of invalid url, please install from this file:
-#   pip install gitpython pytest loguru && pip install vllm/model_executor/layers/fused_moe/pycublas.zip
-# or 
-#   pip install gitpython pytest loguru && pip install git+https://github.com/wenxcs/pycublas.git@moe-group-gemm
+cupy-cuda12x
