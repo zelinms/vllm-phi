@@ -286,25 +286,8 @@ def scaled_fp8_quant(
     scale: Optional[torch.Tensor] = None,
     batch_dim_padding: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Quantize input tensor to FP8 and return quantized tensor and scale.
-
-    This function supports both static and dynamic quantization: If you
-    provide the scale, it will use static scaling and if you omit it,
-    the scale will be determined dynamically. The function also allows
-    optional padding of the output tensor for downstream kernels that
-    will benefit from padding.
-
-    Args:
-        input: The input tensor to be quantized to FP8
-        scale: Optional scaling factor for the FP8 quantization
-        batch_dim_padding: If specified, pad the first dimension
-            of the output to at least this value.
-
-    Returns:
-        Tuple[torch.Tensor, torch.Tensor]: The output tensor in FP8 and
-            scaling factor.
-    """
+   
+    input = input.cuda()
     if batch_dim_padding:
         shape = (max(batch_dim_padding, input.shape[0]), *input.shape[1:])
         output = torch.empty(shape,
@@ -312,11 +295,13 @@ def scaled_fp8_quant(
                              dtype=torch.float8_e4m3fn)
     else:
         output = torch.empty_like(input, dtype=torch.float8_e4m3fn)
+        
     if scale is None:
         scale = torch.zeros(1, device=input.device, dtype=torch.float32)
         torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
         torch.ops._C.static_scaled_fp8_quant(output, input, scale)
+    del input
     return output, scale
 
 

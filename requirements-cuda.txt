@@ -9,3 +9,12 @@ torch == 2.3.0
 torchvision == 0.18.0   # Required for phi3v processor, also see https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
 xformers == 0.0.26.post1  # Requires PyTorch 2.3.0
 vllm-flash-attn == 2.5.9  # Requires PyTorch 2.3.0
+
+# Dependencies for pycublas-moe-groupe-gemm
+gitpython
+pytest
+loguru
+# In case of invalid url, please install from this file:
+#   pip install gitpython pytest loguru && pip install vllm/model_executor/layers/fused_moe/pycublas.zip
+# or 
+#   pip install gitpython pytest loguru && pip install git+https://github.com/wenxcs/pycublas.git@moe-group-gemm

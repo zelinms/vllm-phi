@@ -52,6 +52,9 @@ class Fp8Config(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
+        # TODO: PyTorch 2.3.0+ is required to run FP8 on
+        # SM 89 (e.g. Ada) GPUs. Specifically, this PR has to
+        # be included: https://github.com/pytorch/pytorch/pull/118881
         return 80
 
     @classmethod

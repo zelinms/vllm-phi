@@ -2,15 +2,15 @@
 import functools
 import json
 import os
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Callable
 
 import torch
 import triton
 import triton.language as tl
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.utils import is_hip
 
 logger = init_logger(__name__)
 
@@ -203,15 +203,14 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
-    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
-    sorted_ids = torch.empty((max_num_tokens_padded, ),
+    sorted_ids = torch.empty(
+        (topk_ids.numel() + num_experts * (block_size - 1), ),
+        dtype=torch.int32,
+        device=topk_ids.device)
+    expert_ids = torch.empty((topk_ids.numel() + num_experts, ),
                              dtype=torch.int32,
                              device=topk_ids.device)
     sorted_ids.fill_(topk_ids.numel())
-    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-    expert_ids = torch.empty((max_num_m_blocks, ),
-                             dtype=torch.int32,
-                             device=topk_ids.device)
     num_tokens_post_pad = torch.empty((1),
                                       dtype=torch.int32,
                                       device=topk_ids.device)
@@ -367,29 +366,32 @@ def fused_topk(
         "Number of tokens mismatch")
 
     M, _ = hidden_states.shape
-
-    topk_weights = torch.empty(M,
-                               topk,
-                               dtype=torch.float32,
-                               device=hidden_states.device)
-    topk_ids = torch.empty(M,
-                           topk,
-                           dtype=torch.int32,
-                           device=hidden_states.device)
-    token_expert_indicies = torch.empty(M,
-                                        topk,
-                                        dtype=torch.int32,
-                                        device=hidden_states.device)
-    ops.topk_softmax(
-        topk_weights,
-        topk_ids,
-        token_expert_indicies,
-        gating_output.float(),  # TODO(woosuk): Optimize this.
-    )
-    del token_expert_indicies  # Not used. Will be used in the future.
+    if routing_func != torch.topk:
+        topk_weights, topk_ids = routing_func(gating_output, topk)
+    else:
+        topk_weights = torch.empty(M,
+                                topk,
+                                dtype=torch.float32,
+                                device=hidden_states.device)
+        topk_ids = torch.empty(M,
+                            topk,
+                            dtype=torch.int32,
+                            device=hidden_states.device)
+        token_expert_indicies = torch.empty(M,
+                                            topk,
+                                            dtype=torch.int32,
+                                            device=hidden_states.device)
+        ops.topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indicies,
+            gating_output.float(),  # TODO(woosuk): Optimize this.
+        )
+        del token_expert_indicies  # Not used. Will be used in the future.
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+        
     return topk_weights, topk_ids
 
 
@@ -422,6 +424,7 @@ def grouped_topk(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     return topk_weights, topk_ids
+
 
 
 def fused_experts(hidden_states: torch.Tensor,
@@ -560,6 +563,7 @@ def fused_moe(
     w2_scale: Optional[torch.Tensor] = None,
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
+    routing_func: Callable = torch.topk,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -591,7 +595,7 @@ def fused_moe(
     assert gating_output.shape[1] == w1.shape[0], "Number of experts mismatch"
 
     topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
-                                        renormalize)
+                                        renormalize, routing_func)
     return fused_experts(hidden_states,
                          w1,
                          w2,
