@@ -29,29 +29,30 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 
-from vllm import _custom_ops as ops
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import LoRAConfig
+
+from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.fused_moe import fused_moe
+
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.utils import set_weight_attrs
-from vllm.sequence import SamplerOutput
+from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import print_warning_once
+
+from .interfaces import SupportsLoRA
 
 
 def is_sm80(device_id=0):
@@ -72,7 +73,6 @@ class MixtralConfig(PretrainedConfig):
 
     model_type = "mixtral"
     keys_to_ignore_at_inference = ["past_key_values"]
-    print ("It comes here? makeing sure it use this configs!!!!!!!!!!!!!")
     def __init__(
         self,
         vocab_size=32000,
@@ -128,7 +128,6 @@ class MixtralConfig(PretrainedConfig):
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
         self.router_jitter_noise = router_jitter_noise
-        print ("makeing sure it use this configs!!!!!!!!!!!!!")
         super().__init__(
             pad_token_id=pad_token_id,
             bos_token_id=bos_token_id,
@@ -240,20 +239,15 @@ class PhiMoE(nn.Module):
     across ranks.
     """
 
-    def __init__(
-        self,
-        num_experts: int,
-        top_k: int,
-        hidden_size: int,
-        intermediate_size: int,
-        params_dtype: Optional[torch.dtype] = None,
-        tp_size: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self,
+                 num_experts: int,
+                 top_k: int,
+                 hidden_size: int,
+                 intermediate_size: int,
+                 params_dtype: Optional[torch.dtype] = None,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 tp_size: Optional[int] = None):
         super().__init__()
-        self.tp_size = tp_size or get_tensor_model_parallel_world_size()
-        self.num_total_experts = num_experts
-        self.top_k = top_k
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size // self.tp_size
         # FIXME(pcmoritz): Make this more general to support different
@@ -266,11 +260,6 @@ class PhiMoE(nn.Module):
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
 
-        self.gate = ReplicatedLinear(self.hidden_size,
-                                     self.num_total_experts,
-                                     bias=False,
-                                     params_dtype=self.params_dtype,
-                                     quant_config=None)
         if self.use_fp8:
             cpu_or_gpu = 'cpu'
         else:
@@ -376,8 +365,10 @@ class PhiMoE(nn.Module):
             self.ws = nn.Parameter(ws.to("cuda"), requires_grad=False)
             self.w2s = nn.Parameter(w2s.to("cuda"), requires_grad=False)
 
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        num_tokens, hidden_size = hidden_states.shape
+        # NOTE: hidden_states can have either 1D or 2D shape.
+        orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         router_logits, _ = self.gate(hidden_states)
         if self.apply_a100_fp8:
@@ -416,17 +407,19 @@ class PhiMoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
-class PhiMoEAttention(nn.Module):
 
+class PhiMoEAttention(nn.Module):
     def __init__(self,
                  config: MixtralConfig,
                  hidden_size: int,
                  num_heads: int,
                  num_kv_heads: int,
-                 max_position: int = 4096,
+                 max_position: int = 4096 * 32,
                  rope_theta: float = 10000,
+                 cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  sliding_window: Optional[int] = None) -> None:
+
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -465,7 +458,6 @@ class PhiMoEAttention(nn.Module):
             bias=config.attention_bias,
             quant_config=quant_config,
         )
-        # print ("checking configs", config.attention_bias)
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -480,15 +472,13 @@ class PhiMoEAttention(nn.Module):
             is_neox_style=True,
             rope_scaling=getattr(config, 'rope_scaling', None),
         )
-
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            sliding_window=self.sliding_window,
-        )
-
+        cache_config.sliding_window=self.sliding_window
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
     def forward(
         self,
         positions: torch.Tensor,
@@ -509,6 +499,7 @@ class PhiMoEDecoderLayer(nn.Module):
     def __init__(
         self,
         config: MixtralConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
@@ -522,7 +513,7 @@ class PhiMoEDecoderLayer(nn.Module):
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
-            sliding_window=config.sliding_window,
+            cache_config=cache_config,
             quant_config=quant_config)
 
         self.block_sparse_moe = PhiMoE(
@@ -574,6 +565,7 @@ class PhiMoEModel(nn.Module):
     def __init__(
         self,
         config: MixtralConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
@@ -590,7 +582,7 @@ class PhiMoEModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            PhiMoEDecoderLayer(config, quant_config=quant_config)
+            PhiMoEDecoderLayer(config, cache_config, quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps, elementwise_affine=True)
@@ -613,7 +605,7 @@ class PhiMoEModel(nn.Module):
         return hidden_states
 
 
-class MixtralForCausalLM(nn.Module):
+class MixtralForCausalLM(nn.Module, SupportsLoRA):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -640,12 +632,17 @@ class MixtralForCausalLM(nn.Module):
     def __init__(
         self,
         config: MixtralConfig,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         super().__init__()
+
         self.config = config
+        self.lora_config = lora_config
+
         self.model = PhiMoEModel(config,
+                                  cache_config,
                                   quant_config,
                                   lora_config=lora_config)
         self.unpadded_vocab_size = config.vocab_size
@@ -673,6 +670,7 @@ class MixtralForCausalLM(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata)
@@ -680,7 +678,7 @@ class MixtralForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor,
                        sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
@@ -701,19 +699,29 @@ class MixtralForCausalLM(nn.Module):
         ]
 
         expert_params_mapping = [
+            # These are the weight scales for the experts
+            # (param_name, weight_name, expert_id, shard_id)
+            ("experts.w13_scale"
+             if weight_name in ["w1", "w3"] else "experts.w2_scale",
+             f"experts.{expert_id}.{weight_name}.weight_scale", expert_id,
+             shard_id) for expert_id in range(self.config.num_local_experts)
+            for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
+        ] + [
             # These are the weights for the experts
             # (param_name, weight_name, expert_id)
-            ("ws" if weight_name in ["w1", "w3"] else "w2s",
-             f"experts.{expert_id}.{weight_name}.weight", expert_id)
+            ("experts.w13_weight"
+             if weight_name in ["w1", "w3"] else "experts.w2_weight",
+             f"experts.{expert_id}.{weight_name}.weight", expert_id, shard_id)
             for expert_id in range(self.config.num_local_experts)
-            for weight_name in ["w1", "w2", "w3"]
+            for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
         ] + [
             # These are the activation scales for the experts
             # (param_name, weight_name, expert_id)
-            ("as_scale" if weight_name in ["w1", "w3"] else "a2s_scale",
-             f"experts.{expert_id}.{weight_name}.act_scale", expert_id)
-            for expert_id in range(self.config.num_local_experts)
-            for weight_name in ["w1", "w2", "w3"]
+            ("experts.a13_scale"
+             if weight_name in ["w1", "w3"] else "experts.a2_scale",
+             f"experts.{expert_id}.{weight_name}.input_scale", expert_id,
+             shard_id) for expert_id in range(self.config.num_local_experts)
+            for shard_id, weight_name in enumerate(["w1", "w2", "w3"])
         ]
 
         params_dict = dict(self.named_parameters())
@@ -733,7 +741,8 @@ class MixtralForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for param_name, weight_name, expert_id in expert_params_mapping:
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
                     name = name.replace(weight_name, param_name)
@@ -742,12 +751,27 @@ class MixtralForCausalLM(nn.Module):
                     weight_loader(param,
                                   loaded_weight,
                                   weight_name,
+                                  shard_id=shard_id,
                                   expert_id=expert_id)
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue
+                    # Remapping the name of FP8 kv-scale.
+                    if name.endswith("kv_scale"):
+                        remapped_kv_scale_name = name.replace(
+                            ".kv_scale", ".attn.kv_scale")
+                        if remapped_kv_scale_name not in params_dict:
+                            print_warning_once(
+                                "Found kv scale in the checkpoint "
+                                f"(e.g. {name}), but not found the expected "
+                                f"name in the model "
+                                f"(e.g. {remapped_kv_scale_name}). "
+                                "kv-scale is not loaded.")
+                            continue
+                        else:
+                            name = remapped_kv_scale_name
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
