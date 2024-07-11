@@ -8,6 +8,7 @@ import torch
 import triton
 import triton.language as tl
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.utils import is_hip
@@ -361,6 +362,7 @@ def fused_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
+    routing_func: Callable
 ):
     assert hidden_states.shape[0] == gating_output.shape[0], (
         "Number of tokens mismatch")

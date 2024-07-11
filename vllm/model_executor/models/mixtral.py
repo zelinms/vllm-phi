@@ -20,23 +20,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only PhiMoE model."""
-from typing import Iterable, List, Optional, Tuple
+"""Inference-only Mixtral model."""
+from typing import Iterable, List, Optional, Tuple, Callable
 
 import torch
 from torch import nn
-
-from transformers.configuration_utils import PretrainedConfig
-from transformers.utils import logging
+from transformers import MixtralConfig
 
 from vllm.attention import Attention, AttentionMetadata
-
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.fused_moe import fused_moe
-
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -51,187 +46,11 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, SamplerOutput
 from vllm.utils import print_warning_once
-
 from .interfaces import SupportsLoRA
 
 
-def is_sm80(device_id=0):
-    if not torch.cuda.is_available():
-        return False
-    device_properties = torch.cuda.get_device_properties(device_id)
-    return (device_properties.major == 8 and device_properties.minor == 0)
-
-if is_sm80():
-    import pycublas.trtllm_moe_grouped_gemm as moe_kernel
-    from vllm.model_executor.layers.fused_moe import ampere_fp8_fused_moe
-    fused_moe_a100 = ampere_fp8_fused_moe.fused_moe
-    
-logger = logging.get_logger(__name__)
-
-
-class MixtralConfig(PretrainedConfig):
-
-    model_type = "mixtral"
-    keys_to_ignore_at_inference = ["past_key_values"]
-    def __init__(
-        self,
-        vocab_size=32000,
-        hidden_size=4096,
-        intermediate_size=14336,
-        num_hidden_layers=32,
-        num_attention_heads=32,
-        num_key_value_heads=8,
-        hidden_act="silu",
-        max_position_embeddings=4096 * 32,
-        initializer_range=0.02,
-        rms_norm_eps=1e-5,
-        use_cache=True,
-        pad_token_id=None,
-        bos_token_id=1,
-        eos_token_id=2,
-        tie_word_embeddings=False,
-        rope_theta=1e6,
-        sliding_window=None,
-        attention_dropout=0.0,
-        num_experts_per_tok=2,
-        num_local_experts=16,
-        output_router_logits=False,
-        router_aux_loss_coef=0.001,
-        router_jitter_noise=0.0,
-        attention_bias=False,
-        lm_head_bias=False,
-        **kwargs,
-    ):
-        self.vocab_size = vocab_size
-        self.max_position_embeddings = max_position_embeddings
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-        self.sliding_window = sliding_window
-        self.attention_bias = attention_bias
-        self.lm_head_bias = lm_head_bias
-        # for backward compatibility
-        if num_key_value_heads is None:
-            num_key_value_heads = num_attention_heads
-
-        self.num_key_value_heads = num_key_value_heads
-        self.hidden_act = hidden_act
-        self.initializer_range = initializer_range
-        self.rms_norm_eps = rms_norm_eps
-        self.use_cache = use_cache
-        self.rope_theta = rope_theta
-        self.attention_dropout = attention_dropout
-
-        self.num_experts_per_tok = num_experts_per_tok
-        self.num_local_experts = num_local_experts
-        self.output_router_logits = output_router_logits
-        self.router_aux_loss_coef = router_aux_loss_coef
-        self.router_jitter_noise = router_jitter_noise
-        super().__init__(
-            pad_token_id=pad_token_id,
-            bos_token_id=bos_token_id,
-            eos_token_id=eos_token_id,
-            tie_word_embeddings=tie_word_embeddings,
-            **kwargs,
-        )
-
-
-class mp(torch.autograd.Function):
-
-    @staticmethod
-    def forward(
-        ctx, 
-        scores: torch.Tensor, 
-        multiplier: torch.Tensor, 
-        selected_experts: torch.Tensor,
-        masked_gates: torch.Tensor,
-        mask_for_one: torch.Tensor,
-    ):
-        ctx.save_for_backward(multiplier, selected_experts, masked_gates)
-        return multiplier * mask_for_one
- 
-    @staticmethod
-    def backward(
-        ctx, 
-        grad_at_output: torch.Tensor, 
-    ):
-        multiplier, selected_experts, masked_gates = ctx.saved_tensors
-
-        grad_at_output = grad_at_output * multiplier
-
-        grad_at_scores_expaned = masked_gates * grad_at_output.mul(-1)
-        grad_at_scores_expaned.scatter_add_(
-            dim=-1,
-            index=selected_experts,
-            src=grad_at_output,
-        )
-
-        return (
-            grad_at_scores_expaned, 
-            None, 
-            None, 
-            None, 
-            None, 
-        )
-
-
-def sparsemixer(scores, top_k, jitter_eps=0.01):
-    assert top_k == 2
-    
-    ################ first expert ################
-    
-    with torch.no_grad():
-        # compute mask for sparsity
-        mask_logits_threshold, max_ind = scores.max(dim=-1, keepdim=True)
-        factor = scores.abs().clamp(min=mask_logits_threshold)
-        mask_logits_threshold = (
-            (mask_logits_threshold - scores) / factor
-        ) > (2 * jitter_eps)
-
-    # apply mask 
-    masked_gates = scores.masked_fill(mask_logits_threshold, float('-inf'))
-    selected_experts = max_ind
-        
-    # compute scores for gradients
-    masked_gates = torch.softmax(masked_gates, dim=-1)
-    multiplier_o = masked_gates.gather(dim=-1, index=selected_experts)
-
-    multiplier = multiplier_o
-
-    # masked out first expert 
-    masked_scores = torch.scatter(
-        scores,
-        -1,
-        selected_experts,
-        float('-inf'),
-    )
-    with torch.no_grad():
-        # compute mask for sparsity
-        mask_logits_threshold, max_ind = masked_scores.max(dim=-1, keepdim=True)
-        factor = scores.abs().clamp(min=mask_logits_threshold)
-        mask_logits_threshold = (
-            (mask_logits_threshold - scores) / factor
-        ) > (2 * jitter_eps)
-
-    # apply mask 
-    masked_gates_top2 = masked_scores.masked_fill(mask_logits_threshold, float('-inf'))
-    selected_experts_top2 = max_ind
-    # compute scores for gradients
-    masked_gates_top2 = torch.softmax(masked_gates_top2, dim=-1)
-    multiplier_top2 = masked_gates_top2.gather(dim=-1, index=selected_experts_top2)
-
-    multiplier = torch.concat((multiplier, multiplier_top2), dim=-1)
-    selected_experts = torch.concat((selected_experts, selected_experts_top2), dim=-1)
-    
-    return (
-        multiplier, 
-        selected_experts,
-    )
-
-
-class PhiMoE(nn.Module):
-    """A tensor-parallel MoE implementation for PhiMoE that shards each expert
+class MixtralMoE(nn.Module):
+    """A tensor-parallel MoE implementation for Mixtral that shards each expert
     across all ranks.
 
     Each expert's weights are sharded across all ranks and a fused MoE
@@ -249,177 +68,46 @@ class PhiMoE(nn.Module):
                  tp_size: Optional[int] = None):
         super().__init__()
         self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size // self.tp_size
-        # FIXME(pcmoritz): Make this more general to support different
-        # quantization schemes
-        self.use_fp8 = isinstance(quant_config, Fp8Config)
-        self.apply_a100_fp8 = is_sm80() and self.use_fp8
-        self.remove_subnormal_fp8 = False
-        
-        if params_dtype is None:
-            params_dtype = torch.get_default_dtype()
-        self.params_dtype = params_dtype
 
-        if self.use_fp8:
-            cpu_or_gpu = 'cpu'
-        else:
-            cpu_or_gpu = 'cuda'
-        self.ws = nn.Parameter(
-            torch.empty(self.num_total_experts,
-                        2 * self.intermediate_size,
-                        self.hidden_size,
-                        device=cpu_or_gpu,
-                        dtype=self.params_dtype))
-        self.w2s = nn.Parameter(
-            torch.empty(self.num_total_experts,
-                        self.hidden_size,
-                        self.intermediate_size,
-                        device=cpu_or_gpu,
-                        dtype=self.params_dtype))
+        # Gate always runs at half / full precision for now.
+        self.gate = ReplicatedLinear(hidden_size,
+                                     num_experts,
+                                     bias=False,
+                                     params_dtype=params_dtype,
+                                     quant_config=None)
 
-        set_weight_attrs(self.ws, {
-            "weight_loader": self.weight_loader,
-        })
-        set_weight_attrs(self.w2s, {
-            "weight_loader": self.weight_loader,
-        })
-
-        # Scaling factors for FP8 weights
-        self.ws_scale = nn.Parameter(
-            torch.ones(
-                self.num_total_experts, device="cuda", dtype=torch.float32),
-            requires_grad=False) if self.use_fp8 else None
-        self.w2s_scale = nn.Parameter(
-            torch.ones(
-                self.num_total_experts, device="cuda", dtype=torch.float32),
-            requires_grad=False) if self.use_fp8 else None
-
-        # Scaling factors for FP8 activations
-        need_act_scales = (self.use_fp8
-                           and quant_config.activation_scheme == "static")
-        self.as_scale = nn.Parameter(
-            torch.zeros(1, device="cuda", dtype=torch.float32),
-            requires_grad=False) if need_act_scales else None
-        self.a2s_scale = nn.Parameter(
-            torch.zeros(1, device="cuda", dtype=torch.float32),
-            requires_grad=False) if need_act_scales else None
-
-        if need_act_scales:
-            set_weight_attrs(self.as_scale, {
-                "weight_loader": self.weight_loader,
-            })
-            set_weight_attrs(self.a2s_scale, {
-                "weight_loader": self.weight_loader,
-            })
-
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
-                      weight_name: str, expert_id: int):
-        tp_rank = get_tensor_model_parallel_rank()
-        param_data = param.data
-        shard_size = self.intermediate_size
-        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
-        if weight_name.endswith("w1.weight"):
-            param_data[expert_id, 0:shard_size, :] = loaded_weight[shard, :]
-        if weight_name.endswith("w3.weight"):
-            param_data[expert_id,
-                       shard_size:2 * shard_size, :] = loaded_weight[shard, :]
-        if weight_name.endswith("w2.weight"):
-            param_data[expert_id, :, :] = loaded_weight[:, shard]
-        if "act_scale" in weight_name:
-            param_data[:] = param_data[:].max(loaded_weight)
-
-    def process_weights_after_loading(self):
-        if self.use_fp8:
-            ws = torch.empty_like(self.ws.data, dtype=torch.float8_e4m3fn)
-            w2s = torch.empty_like(self.w2s.data, dtype=torch.float8_e4m3fn)
-            for expert in range(self.num_total_experts):
-                ws[expert, :, :], self.ws_scale[expert] = ops.scaled_fp8_quant(
-                    self.ws.data[expert, :, :])
-                w2s[expert, :, :], self.w2s_scale[
-                    expert] = ops.scaled_fp8_quant(self.w2s.data[expert, :, :])
-
-            if self.apply_a100_fp8 and self.remove_subnormal_fp8:
-                print_warning_once("Removing FP8 subnormal values from weights")
-                def remove_subnormal_fp8(tensor):
-                    assert tensor.dtype == torch.uint8, "Tensor must be a byte tensor representing fp8 values"
-                    exponent_mask = 0b11111000
-                    mantissa_mask = 0b00000111
-                    exponents = (tensor & exponent_mask) >> 3
-                    mantissas = tensor & mantissa_mask
-                    subnormal_mask = (exponents == 0) & (mantissas != 0)
-                    if subnormal_mask.any():
-                        print(subnormal_mask.sum().item() / subnormal_mask.numel() * 100, "% of values are subnormal")
-                    tensor[subnormal_mask] = 0
-                    return subnormal_mask.any()
-
-                remove_subnormal_fp8(ws.view(torch.uint8))
-                remove_subnormal_fp8(w2s.view(torch.uint8))
-
-            if self.apply_a100_fp8:
-                print_warning_once("Preprocessing weights for A100 FP8 fused MoE")
-                ws = moe_kernel.preprocess_weights_for_mixed_gemm(ws.view(torch.int8).transpose(1,2).contiguous().cpu()).to(w2s.device)
-                w2s = moe_kernel.preprocess_weights_for_mixed_gemm(w2s.view(torch.int8).transpose(1,2).contiguous().cpu()).to(ws.device)
-                self.ws_scale = nn.Parameter(self.ws_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, ws.size(-1)).contiguous(), requires_grad=False)
-                self.w2s_scale = nn.Parameter(self.w2s_scale.to(dtype=torch.float16).unsqueeze(1).expand(-1, w2s.size(-1)).contiguous(), requires_grad=False)
-
-            self.ws = nn.Parameter(ws.to("cuda"), requires_grad=False)
-            self.w2s = nn.Parameter(w2s.to("cuda"), requires_grad=False)
-
+        self.experts = FusedMoE(num_experts=num_experts,
+                                top_k=top_k,
+                                hidden_size=hidden_size,
+                                intermediate_size=intermediate_size,
+                                params_dtype=params_dtype,
+                                reduce_results=True,
+                                renormalize=True,
+                                quant_config=quant_config,
+                                tp_size=tp_size)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
+        # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        if self.apply_a100_fp8:
-            final_hidden_states = fused_moe_a100(hidden_states,
-                                            self.ws,
-                                            self.w2s,
-                                            router_logits,
-                                            self.top_k,
-                                            renormalize=False,
-                                            inplace=True,
-                                            use_fp8=self.use_fp8,
-                                            w1_scale=self.ws_scale,
-                                            w2_scale=self.w2s_scale,
-                                            a1_scale=self.as_scale,
-                                            a2_scale=self.a2s_scale,
-                                            routing_func=sparsemixer)            
-        else:
-            final_hidden_states = fused_moe(hidden_states,
-                                            self.ws,
-                                            self.w2s,
-                                            router_logits,
-                                            self.top_k,
-                                            renormalize=False,
-                                            inplace=True,
-                                            use_fp8=self.use_fp8,
-                                            w1_scale=self.ws_scale,
-                                            w2_scale=self.w2s_scale,
-                                            a1_scale=self.as_scale,
-                                            a2_scale=self.a2s_scale,
-                                            routing_func=sparsemixer)
-
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states)
-
-        return final_hidden_states.view(num_tokens, hidden_size)
+        final_hidden_states = self.experts(hidden_states, router_logits)
+        return final_hidden_states.view(orig_shape)
 
 
+class MixtralAttention(nn.Module):
 
-class PhiMoEAttention(nn.Module):
-    def __init__(self,
-                 config: MixtralConfig,
-                 hidden_size: int,
-                 num_heads: int,
-                 num_kv_heads: int,
-                 max_position: int = 4096 * 32,
-                 rope_theta: float = 10000,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 sliding_window: Optional[int] = None) -> None:
-
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        max_position: int = 4096 * 32,
+        rope_theta: float = 10000,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+    ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -441,27 +129,19 @@ class PhiMoEAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
-        self.sliding_window = sliding_window
-
-        if isinstance(quant_config, Fp8Config):
-            print_warning_once(
-                "For PhiMoE FP8 quantization, we currently do not quantize "
-                "the attention layers until their FP8 performance is improved."
-            )
-            quant_config = None
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=config.attention_bias,
+            bias=False,
             quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
-            bias=config.attention_bias,
+            bias=False,
             quant_config=quant_config,
         )
         self.rotary_emb = get_rope(
@@ -470,15 +150,14 @@ class PhiMoEAttention(nn.Module):
             max_position=max_position,
             base=int(self.rope_theta),
             is_neox_style=True,
-            rope_scaling=getattr(config, 'rope_scaling', None),
         )
-        cache_config.sliding_window=self.sliding_window
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -494,7 +173,7 @@ class PhiMoEAttention(nn.Module):
         return output
 
 
-class PhiMoEDecoderLayer(nn.Module):
+class MixtralDecoderLayer(nn.Module):
 
     def __init__(
         self,
@@ -506,8 +185,7 @@ class PhiMoEDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 10000)
-        self.self_attn = PhiMoEAttention(
-            config=config,
+        self.self_attn = MixtralAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
@@ -515,20 +193,16 @@ class PhiMoEDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config)
-
-        self.block_sparse_moe = PhiMoE(
+        self.block_sparse_moe = MixtralMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config)
-
-        self.input_layernorm = nn.LayerNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps,
-                                       elementwise_affine=True)
-        self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps,
-                                                elementwise_affine=True)
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -538,29 +212,28 @@ class PhiMoEDecoderLayer(nn.Module):
         attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
     ) -> torch.Tensor:
-        residual = hidden_states
-
         # Self Attention
-        hidden_states = self.input_layernorm(hidden_states)
-
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-        hidden_states = hidden_states + residual
 
         # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
         hidden_states = self.block_sparse_moe(hidden_states)
-
-        hidden_states = hidden_states + residual
         return hidden_states, residual
 
 
-class PhiMoEModel(nn.Module):
+class MixtralModel(nn.Module):
 
     def __init__(
         self,
@@ -582,10 +255,12 @@ class PhiMoEModel(nn.Module):
             org_num_embeddings=config.vocab_size,
         )
         self.layers = nn.ModuleList([
-            PhiMoEDecoderLayer(config, cache_config, quant_config=quant_config)
+            MixtralDecoderLayer(config,
+                                cache_config,
+                                quant_config=quant_config)
             for _ in range(config.num_hidden_layers)
         ])
-        self.norm = nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps, elementwise_affine=True)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -601,7 +276,7 @@ class PhiMoEModel(nn.Module):
             hidden_states, residual = layer(positions, hidden_states,
                                             kv_caches[i], attn_metadata,
                                             residual)
-        hidden_states = self.norm(hidden_states)
+        hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
 
@@ -641,7 +316,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
         self.config = config
         self.lora_config = lora_config
 
-        self.model = PhiMoEModel(config,
+        self.model = MixtralModel(config,
                                   cache_config,
                                   quant_config,
                                   lora_config=lora_config)
@@ -656,13 +331,11 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA):
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
-            bias=True
+            quant_config=quant_config,
         )
-        
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.sampler = Sampler()
-
 
     def forward(
         self,
