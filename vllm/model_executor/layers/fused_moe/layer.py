@@ -108,6 +108,7 @@ class FusedMoE(torch.nn.Module):
         renormalize: bool = True,
         quant_config: Optional[QuantizationConfig] = None,
         tp_size: Optional[int] = None,
+        routing_func: Callable = torch.topk
     ):
         super().__init__()
 
@@ -136,7 +137,8 @@ class FusedMoE(torch.nn.Module):
             intermediate_size=self.intermediate_size_per_partition,
             params_dtype=params_dtype,
             weight_loader=self.weight_loader)
-
+        self.routing_func = routing_func
+        
     def weight_loader(self, param: torch.nn.Parameter,
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: int, expert_id: int):
@@ -185,12 +187,21 @@ class FusedMoE(torch.nn.Module):
         assert self.quant_method is not None
 
         # Matrix multiply.
-        final_hidden_states = self.quant_method.apply(
-            self,
-            x=hidden_states,
-            router_logits=router_logits,
-            top_k=self.top_k,
-            renormalize=self.renormalize)
+        if self.routing_func !=  torch.topk:
+            final_hidden_states = self.quant_method.apply(
+                self,
+                x=hidden_states,
+                router_logits=router_logits,
+                top_k=self.top_k,
+                renormalize=self.renormalize,
+                routing_func=self.routing_func)
+        else:
+            final_hidden_states = self.quant_method.apply(
+                self,
+                x=hidden_states,
+                router_logits=router_logits,
+                top_k=self.top_k,
+                renormalize=self.renormalize)
 
         if self.reduce_results and self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(
