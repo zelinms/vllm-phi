@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Callable
 
 import torch
 from torch.nn import Module
@@ -380,7 +380,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
               x: torch.Tensor,
               router_logits: torch.Tensor,
               top_k: int,
-              renormalize: bool = True) -> torch.Tensor:
+              renormalize: bool = True,
+              routing_func: Callable = torch.topk) -> torch.Tensor:
 
         return fused_moe(x,
                          layer.w13_weight,
@@ -393,7 +394,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                          w1_scale=layer.w13_scale,
                          w2_scale=layer.w2_scale,
                          a1_scale=layer.a13_scale,
-                         a2_scale=layer.a2_scale)
+                         a2_scale=layer.a2_scale,
+                         routing_func=routing_func)
 
 
 class Fp8KVCacheMethod(QuantizeMethodBase):
