@@ -422,13 +422,21 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
+        *,
+        max_seq_tokens_list: Optional[List[int]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         query = query.view(*query.shape[:-1], -1, self.head_size)
         key = key.view(*key.shape[:-1], -1, self.head_size)
 
         k = self.original_max_position_embeddings
-        long_prompt_offset = (torch.any(positions > k).float() *
-                              torch.full_like(positions, k)).long()
+        if max_seq_tokens_list is None:
+            long_prompt_offset = (torch.any(positions > k).float() *
+                                torch.full_like(positions, k)).long()
+        else:
+            max_seq_tokens_tensor = torch.tensor(max_seq_tokens_list)
+            long_prompt_offset = torch.where(
+                max_seq_tokens_tensor <= k, torch.zeros_like(max_seq_tokens_tensor),
+                torch.full_like(max_seq_tokens_tensor, k))
         idx = (torch.add(positions, long_prompt_offset)
                if long_prompt_offset is not None else positions)
         self.long_short_cos_sin_cache: torch.Tensor = (

@@ -232,6 +232,7 @@ class ModelRunner:
         lora_requests: Set[LoRARequest] = set()
 
         prompt_lens: List[int] = []
+        max_seq_tokens_list: List[int] = []
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
@@ -265,6 +266,7 @@ class ModelRunner:
             prompt_tokens = seq_data.get_token_ids()[computed_len:prefill_end]
             prompt_len = prefill_end
             prompt_lens.append(prompt_len)
+            max_seq_tokens_list.append(seq_group_metadata.sampling_params.max_tokens + prompt_len)
 
             # NOTE: This only works for oooooooxxx style attention.
             if computed_block_nums is not None and len(
@@ -396,6 +398,7 @@ class ModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             prompt_lens=prompt_lens,
+            max_seq_tokens_list=max_seq_tokens_list,
             prompt_lens_tensor=prompt_lens_tensor,
             max_subquery_len=max_subquery_len,
             max_context_len=None,
@@ -426,6 +429,7 @@ class ModelRunner:
     ) -> PrepareDecodeMetadata:
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        max_seq_tokens_list: List[int] = []
         slot_mapping: List[int] = []
         context_lens: List[int] = []
         block_tables: List[List[int]] = []
@@ -450,6 +454,7 @@ class ModelRunner:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append(generation_token)
+                max_seq_tokens_list.append(seq_group_metadata.sampling_params.max_tokens + seq_data.get_prompt_len())
 
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
@@ -526,6 +531,7 @@ class ModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             prompt_lens=None,
+            max_seq_tokens_list=max_seq_tokens_list,
             prompt_lens_tensor=None,
             max_subquery_len=None,
             max_context_len=max_context_len,
