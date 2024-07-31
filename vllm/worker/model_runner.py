@@ -925,7 +925,7 @@ class ModelRunner:
                     is_prompt=False,
                     prompt_lens=None,
                     prompt_lens_tensor=None,
-                    max_seq_tokens_list=None,
+                    max_seq_tokens_list=[],
                     max_subquery_len=None,
                     max_context_len=self.max_context_len_to_capture,
                     max_prompt_len=None,
