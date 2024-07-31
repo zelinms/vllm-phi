@@ -133,45 +133,54 @@ class PhiMoEConfig(PretrainedConfig):
             **kwargs,
         )
 
-def sparsemixer(scores, top_k, jitter_eps=0.1):
+def sparsemixer(scores, top_k, jitter_eps=0.01):
     assert top_k == 2
+    
+    ################ first expert ################
+    
+    with torch.no_grad():
+        # compute mask for sparsity
+        mask_logits_threshold, max_ind = scores.max(dim=-1, keepdim=True)
+        factor = scores.abs().clamp(min=mask_logits_threshold)
+        mask_logits_threshold = (
+            (mask_logits_threshold - scores) / factor
+        ) > (2 * jitter_eps)
 
-    ################ routing ################
+    # apply mask 
+    masked_gates = scores.masked_fill(mask_logits_threshold, float('-inf'))
+    selected_experts = max_ind
+        
+    # compute scores for gradients
+    masked_gates = torch.softmax(masked_gates, dim=-1)
+    multiplier_o = masked_gates.gather(dim=-1, index=selected_experts)
 
-    mask_logits_threshold, selected_experts = torch.topk(scores, 2)
+    multiplier = multiplier_o
 
-    ################ first expert gating ################
+    # masked out first expert 
+    masked_scores = torch.scatter(
+        scores,
+        -1,
+        selected_experts,
+        float('-inf'),
+    )
+    with torch.no_grad():
+        # compute mask for sparsity
+        mask_logits_threshold, max_ind = masked_scores.max(dim=-1, keepdim=True)
+        factor = scores.abs().clamp(min=mask_logits_threshold)
+        mask_logits_threshold = (
+            (mask_logits_threshold - scores) / factor
+        ) > (2 * jitter_eps)
 
-    mask_logits_threshold_1 = mask_logits_threshold[:, 0].unsqueeze(-1)
+    # apply mask 
+    masked_gates_top2 = masked_scores.masked_fill(mask_logits_threshold, float('-inf'))
+    selected_experts_top2 = max_ind
+    # compute scores for gradients
+    masked_gates_top2 = torch.softmax(masked_gates_top2, dim=-1)
+    multiplier_top2 = masked_gates_top2.gather(dim=-1, index=selected_experts_top2)
 
-    factor = scores.abs().clamp(min=mask_logits_threshold_1)
-    logits_mask = (
-        (mask_logits_threshold_1 - scores) / factor
-    ) > (2 * jitter_eps)
-
-    multiplier_1 = torch.softmax(
-      scores.masked_fill(logits_mask, float('-inf')), dim=-1
-    ).gather(dim=-1, index=selected_experts[:, 0].unsqueeze(-1))
-
-    ################ second expert gating ################
-
-    mask_logits_threshold_2 = mask_logits_threshold[:, 1].unsqueeze(-1)
-
-    factor = scores.abs().clamp(min=mask_logits_threshold_2)
-    logits_mask = (
-        (mask_logits_threshold_2 - scores) / factor
-    ) > (2 * jitter_eps)
-
-    multiplier_2 = torch.softmax(
-      torch.scatter(
-        scores, -1, selected_experts[:, 0].unsqueeze(-1), float('-inf')
-      ).masked_fill(
-        logits_mask, float('-inf')
-      ), 
-      dim=-1
-    ).gather(dim=-1, index=selected_experts[:, 1].unsqueeze(-1))
-
-    multiplier = torch.concat((multiplier_1, multiplier_2), dim=-1)
+    multiplier = torch.concat((multiplier, multiplier_top2), dim=-1)
+    selected_experts = torch.concat((selected_experts, selected_experts_top2), dim=-1)
+    
     return (
         multiplier, 
         selected_experts,
