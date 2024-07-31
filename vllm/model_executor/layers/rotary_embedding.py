@@ -433,7 +433,7 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
             long_prompt_offset = (torch.any(positions > k).float() *
                                 torch.full_like(positions, k)).long()
         else:
-            max_seq_tokens_tensor = torch.tensor(max_seq_tokens_list).to(long_prompt_offset.device)
+            max_seq_tokens_tensor = torch.tensor(max_seq_tokens_list).to(positions.device)
             long_prompt_offset = torch.where(
                 max_seq_tokens_tensor <= k, torch.zeros_like(max_seq_tokens_tensor),
                 torch.full_like(max_seq_tokens_tensor, k))
