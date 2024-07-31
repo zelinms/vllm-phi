@@ -266,10 +266,6 @@ class ModelRunner:
             prompt_tokens = seq_data.get_token_ids()[computed_len:prefill_end]
             prompt_len = prefill_end
             prompt_lens.append(prompt_len)
-            if seq_group_metadata.sampling_params.max_tokens is not None:
-                max_seq_tokens_list.append(seq_group_metadata.sampling_params.max_tokens + prompt_len)
-            else:
-                max_seq_tokens_list.append(self.model_config.max_model_len)
 
             # NOTE: This only works for oooooooxxx style attention.
             if computed_block_nums is not None and len(
@@ -300,6 +296,13 @@ class ModelRunner:
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, prefill_end)))
+
+            for _ in range(computed_len, prefill_end):
+                if seq_group_metadata.sampling_params.max_tokens is not None:
+                    max_seq_tokens_list.append(seq_group_metadata.sampling_params.max_tokens + prompt_len)
+                else:
+                    max_seq_tokens_list.append(self.model_config.max_model_len)
+
             lora_id = seq_group_metadata.lora_int_id
 
             if lora_id > 0:
