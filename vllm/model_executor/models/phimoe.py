@@ -1,4 +1,10 @@
-
+# coding=utf-8
+# Adapted from
+# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
+# Copyright 2023 The vLLM team.
+# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+# Copyright 2024 Microsoft team. All rights reserved.
+#
 # This code is modified based on mixtral.py
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
