@@ -164,8 +164,10 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         max_seq_tokens_list = []
-        max_seq_tokens_list.extend(attn_metadata.prefill_metadata.max_seq_tokens_list)
-        max_seq_tokens_list.extend(attn_metadata.decode_metadata.max_seq_tokens_list)
+        if attn_metadata.prefill_metadata is not None:
+            max_seq_tokens_list.extend(attn_metadata.prefill_metadata.max_seq_tokens_list)
+        if attn_metadata.decode_metadata is not None:
+            max_seq_tokens_list.extend(attn_metadata.decode_metadata.max_seq_tokens_list)
         q, k = self.rotary_emb(positions, q, k, max_seq_tokens_list=max_seq_tokens_list)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
                                 self.kv_scale)
