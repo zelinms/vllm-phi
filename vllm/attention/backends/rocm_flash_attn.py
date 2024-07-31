@@ -69,7 +69,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadataPerStage,
     # prompt_lens stored as a tensor.
     prompt_lens_tensor: Optional[torch.Tensor]
 
-    max_seq_tokens_list: Optional[List[int]]
+    max_seq_tokens_tensor: torch.Tensor
 
     # NOTE(sang): Definition of context_len, subquery_len, and seqlen.
     # |---------- N-1 iteration --------|

@@ -404,7 +404,7 @@ class ModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             prompt_lens=prompt_lens,
-            max_seq_tokens_list=max_seq_tokens_list,
+            max_seq_tokens_tensor=torch.tensor(max_seq_tokens_list).long().to(self.device),
             prompt_lens_tensor=prompt_lens_tensor,
             max_subquery_len=max_subquery_len,
             max_context_len=None,
@@ -540,7 +540,7 @@ class ModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             prompt_lens=None,
-            max_seq_tokens_list=max_seq_tokens_list,
+            max_seq_tokens_tensor=torch.tensor(max_seq_tokens_list).long().to(self.device),
             prompt_lens_tensor=None,
             max_subquery_len=None,
             max_context_len=max_context_len,
@@ -925,7 +925,7 @@ class ModelRunner:
                     is_prompt=False,
                     prompt_lens=None,
                     prompt_lens_tensor=None,
-                    max_seq_tokens_list= [0] * batch_size,
+                    max_seq_tokens_tensor= torch.tensor([0] * batch_size).long().cuda(),
                     max_subquery_len=None,
                     max_context_len=self.max_context_len_to_capture,
                     max_prompt_len=None,
