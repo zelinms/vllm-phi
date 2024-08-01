@@ -298,6 +298,7 @@ class ModelRunner:
             input_positions.extend(list(range(computed_len, prefill_end)))
 
             max_seq_tokens_list.append(prompt_len)
+            print(f"_prepare_prompt max_seq_tokens_list[0]: {max_seq_tokens_list[0]}")
 
             lora_id = seq_group_metadata.lora_int_id
 
@@ -457,6 +458,7 @@ class ModelRunner:
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append(generation_token)
                 max_seq_tokens_list.append(seq_data.get_prompt_len())
+                print(f"_prepare_decode max_seq_tokens_list[0]: {max_seq_tokens_list[0]}")
 
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
