@@ -297,8 +297,8 @@ class ModelRunner:
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, prefill_end)))
 
-            max_seq_tokens_list.append(prompt_len)
-            print(f"_prepare_prompt max_seq_tokens_list[0]: {max_seq_tokens_list[0]}")
+            for i in range(computed_len, prefill_end):
+                max_seq_tokens_list.append(prompt_len)
 
             lora_id = seq_group_metadata.lora_int_id
 
