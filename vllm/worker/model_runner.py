@@ -711,6 +711,15 @@ class ModelRunner:
                 metadata_dict = broadcast_tensor_dict(src=0)
                 decode_attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
+                
+        if prefill_attn_metadata is not None:
+            max_seq_tokens_tensor = prefill_attn_metadata.max_seq_tokens_tensor
+            if decode_attn_metadata is not None:
+                max_seq_tokens_tensor = torch.cat(
+                    [max_seq_tokens_tensor, decode_attn_metadata.max_seq_tokens_tensor],
+                )
+        else:
+            max_seq_tokens_tensor = decode_attn_metadata.max_seq_tokens_tensor
 
         attn_metadata = AttentionMetadata(
             num_prefills=num_prefills,
@@ -942,6 +951,7 @@ class ModelRunner:
                     slot_mapping=slot_mapping[:batch_size],
                     prefill_metadata=None,
                     decode_metadata=decode_metadata,
+                    max_seq_tokens_tensor=decode_metadata.max_seq_tokens_tensor,
                     kv_cache_dtype=self.kv_cache_dtype,
                 )
 
