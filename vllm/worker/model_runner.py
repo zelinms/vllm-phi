@@ -1054,6 +1054,7 @@ class CUDAGraphRunner:
             "slot_mapping": attn_metadata.slot_mapping,
             "context_lens": attn_metadata.decode_metadata.context_lens,
             "block_tables": attn_metadata.decode_metadata.block_tables,
+            "max_seq_tokens_tensor": attn_metadata.max_seq_tokens_tensor,
         }
         self.output_buffers = {"hidden_states": hidden_states}
         return
@@ -1078,6 +1079,8 @@ class CUDAGraphRunner:
             attn_metadata.decode_metadata.context_lens, non_blocking=True)
         self.input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
+        self.input_buffers["max_seq_tokens_tensor"].copy_(
+            attn_metadata.max_seq_tokens_tensor, non_blocking=True)
         # Run the graph.
         self.graph.replay()
 
