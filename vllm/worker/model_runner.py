@@ -460,10 +460,7 @@ class ModelRunner:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append(generation_token)
-                if seq_group_metadata.sampling_params.max_tokens is not None:
-                    max_seq_tokens_list.append(seq_group_metadata.sampling_params.max_tokens + seq_data.get_prompt_len())
-                else:
-                    max_seq_tokens_list.append(self.model_config.max_model_len)
+                max_seq_tokens_list.append(seq_data.get_prompt_len())
 
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
