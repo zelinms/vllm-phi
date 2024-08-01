@@ -728,6 +728,7 @@ class ModelRunner:
             num_decode_tokens=num_decode_tokens,
             prefill_metadata=prefill_attn_metadata,
             decode_metadata=decode_attn_metadata,
+            max_seq_tokens_tensor=max_seq_tokens_tensor,
             kv_cache_dtype=self.kv_cache_dtype,
         )
 
