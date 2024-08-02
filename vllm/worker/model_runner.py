@@ -232,6 +232,7 @@ class ModelRunner:
         lora_requests: Set[LoRARequest] = set()
 
         prompt_lens: List[int] = []
+        max_seq_tokens_list: List[int] = []
         context_lens: List[int] = []
         subquery_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
@@ -295,6 +296,13 @@ class ModelRunner:
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
             input_positions.extend(list(range(computed_len, prefill_end)))
+
+            for _ in range(computed_len, prefill_end):
+                if seq_group_metadata.sampling_params.max_tokens is not None:
+                    max_seq_tokens_list.append(prompt_len)
+                else:
+                    max_seq_tokens_list.append(prompt_len)
+
             lora_id = seq_group_metadata.lora_int_id
 
             if lora_id > 0:
@@ -396,6 +404,7 @@ class ModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             prompt_lens=prompt_lens,
+            max_seq_tokens_tensor=torch.tensor(max_seq_tokens_list).long().to(self.device),
             prompt_lens_tensor=prompt_lens_tensor,
             max_subquery_len=max_subquery_len,
             max_context_len=None,
@@ -426,6 +435,7 @@ class ModelRunner:
     ) -> PrepareDecodeMetadata:
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        max_seq_tokens_list: List[int] = []
         slot_mapping: List[int] = []
         context_lens: List[int] = []
         block_tables: List[List[int]] = []
@@ -450,6 +460,10 @@ class ModelRunner:
                 seq_data = seq_group_metadata.seq_data[seq_id]
                 generation_token = seq_data.get_last_token_id()
                 input_tokens.append(generation_token)
+                if seq_group_metadata.sampling_params.max_tokens is not None:
+                    max_seq_tokens_list.append(seq_data.get_prompt_len())
+                else:
+                    max_seq_tokens_list.append(seq_data.get_prompt_len())
 
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
@@ -526,6 +540,7 @@ class ModelRunner:
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             prompt_lens=None,
+            max_seq_tokens_tensor=torch.tensor(max_seq_tokens_list).long().to(self.device),
             prompt_lens_tensor=None,
             max_subquery_len=None,
             max_context_len=max_context_len,
@@ -696,6 +711,15 @@ class ModelRunner:
                 metadata_dict = broadcast_tensor_dict(src=0)
                 decode_attn_metadata = self.attn_backend.make_metadata(
                     **metadata_dict)
+                
+        if prefill_attn_metadata is not None:
+            max_seq_tokens_tensor = prefill_attn_metadata.max_seq_tokens_tensor
+            if decode_attn_metadata is not None:
+                max_seq_tokens_tensor = torch.cat(
+                    [max_seq_tokens_tensor, decode_attn_metadata.max_seq_tokens_tensor],
+                )
+        else:
+            max_seq_tokens_tensor = decode_attn_metadata.max_seq_tokens_tensor
 
         attn_metadata = AttentionMetadata(
             num_prefills=num_prefills,
@@ -704,6 +728,7 @@ class ModelRunner:
             num_decode_tokens=num_decode_tokens,
             prefill_metadata=prefill_attn_metadata,
             decode_metadata=decode_attn_metadata,
+            max_seq_tokens_tensor=max_seq_tokens_tensor,
             kv_cache_dtype=self.kv_cache_dtype,
         )
 
@@ -910,6 +935,7 @@ class ModelRunner:
                     is_prompt=False,
                     prompt_lens=None,
                     prompt_lens_tensor=None,
+                    max_seq_tokens_tensor= torch.tensor([0] * batch_size).long().cuda(),
                     max_subquery_len=None,
                     max_context_len=self.max_context_len_to_capture,
                     max_prompt_len=None,
@@ -926,6 +952,7 @@ class ModelRunner:
                     slot_mapping=slot_mapping[:batch_size],
                     prefill_metadata=None,
                     decode_metadata=decode_metadata,
+                    max_seq_tokens_tensor=decode_metadata.max_seq_tokens_tensor,
                     kv_cache_dtype=self.kv_cache_dtype,
                 )
 
@@ -1027,6 +1054,7 @@ class CUDAGraphRunner:
             "slot_mapping": attn_metadata.slot_mapping,
             "context_lens": attn_metadata.decode_metadata.context_lens,
             "block_tables": attn_metadata.decode_metadata.block_tables,
+            "max_seq_tokens_tensor": attn_metadata.max_seq_tokens_tensor,
         }
         self.output_buffers = {"hidden_states": hidden_states}
         return
@@ -1051,6 +1079,8 @@ class CUDAGraphRunner:
             attn_metadata.decode_metadata.context_lens, non_blocking=True)
         self.input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
+        self.input_buffers["max_seq_tokens_tensor"].copy_(
+            attn_metadata.max_seq_tokens_tensor, non_blocking=True)
         # Run the graph.
         self.graph.replay()
 
