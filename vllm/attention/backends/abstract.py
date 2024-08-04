@@ -86,6 +86,7 @@ class AttentionMetadata(Generic[T]):
     slot_mapping: torch.Tensor
     # The kv cache's data type.
     kv_cache_dtype: str
+    max_seq_tokens_tensor: torch.Tensor
 
     def __post_init__(self):
         if self.num_prefill_tokens > 0:

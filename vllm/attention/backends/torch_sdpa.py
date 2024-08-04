@@ -59,6 +59,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata,
     is_prompt: bool
     slot_mapping: torch.Tensor
     prompt_lens: Optional[List[int]]
+    max_seq_tokens_tensor: torch.Tensor
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
