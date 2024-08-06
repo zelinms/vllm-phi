@@ -42,9 +42,11 @@ def mock_causal_accepted_tensor(
 @pytest.mark.parametrize(
     "which_tokens_accepted",
     ["all_tokens_accepted", "no_tokens_accepted", "some_tokens_accepted"])
+@pytest.mark.parametrize("disable_bonus_tokens", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
-def test_correct_output_format(which_tokens_accepted: str, seed: int,
+def test_correct_output_format(which_tokens_accepted: str,
+                               disable_bonus_tokens: bool, seed: int,
                                device: str):
     """Verify the output has correct format given predetermined accepted matrix.
     """
@@ -82,7 +84,8 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
                                     size=(batch_size, 1),
                                     dtype=torch.int64)
 
-    rejection_sampler = RejectionSampler()
+    rejection_sampler = RejectionSampler(
+        disable_bonus_tokens=disable_bonus_tokens)
     rejection_sampler.init_gpu_tensors(rank=0)
     output_token_ids = rejection_sampler._create_output(  # pylint: disable=protected-access
         accepted,
@@ -91,9 +94,11 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
         bonus_token_ids,
     )
 
-    # Bonus tokens are currently disabled. Verify they're set to -1.
+    expected_bonus_token_ids = bonus_token_ids.clone()
+    # If bonus tokens disabled. Verify they are set to -1.
     # See https://github.com/vllm-project/vllm/issues/4212
-    expected_bonus_token_ids = bonus_token_ids.clone() * 0 - 1
+    if disable_bonus_tokens:
+        expected_bonus_token_ids = expected_bonus_token_ids * 0 - 1
 
     if which_tokens_accepted == "all_tokens_accepted":
         # Expect all tokens to be equal to draft tokens.
@@ -148,6 +153,49 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
 
     rejection_sampler(target_probs, bonus_token_ids, draft_probs,
                       draft_token_ids)
+
+
+@pytest.mark.parametrize("frac_seeded", [0.0, 0.25, 0.5, 1.0])
+@pytest.mark.parametrize("k", [1, 3, 6])
+@pytest.mark.parametrize("vocab_size", [30_000, 50_000])
+@pytest.mark.parametrize("batch_size", [1, 8, 32, 128])
+@pytest.mark.parametrize("n_rep", [100])
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
+                                   frac_seeded: float, n_rep: int,
+                                   device: str):
+    torch.set_default_device(device)
+    rejection_sampler = RejectionSampler()
+    rejection_sampler.init_gpu_tensors(rank=0)
+
+    draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
+    target_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
+    bonus_token_ids = torch.randint(low=0,
+                                    high=vocab_size,
+                                    size=(batch_size, 1),
+                                    dtype=torch.int64)
+    draft_token_ids = torch.randint(low=0,
+                                    high=vocab_size,
+                                    size=(batch_size, k),
+                                    dtype=torch.int64)
+
+    seeded_mask = torch.rand(batch_size, dtype=torch.float32) <= frac_seeded
+
+    results = []
+    for _ in range(n_rep):
+        seeded_seqs = {
+            i: torch.Generator(device=device).manual_seed(i)
+            for i in range(batch_size) if seeded_mask[i]
+        }
+        results.append(
+            rejection_sampler(target_probs, bonus_token_ids, draft_probs,
+                              draft_token_ids, seeded_seqs))
+
+    for i in range(batch_size):
+        if seeded_mask[i]:
+            for j in range(1, n_rep):
+                assert torch.equal(results[j][i], results[0][i])
 
 
 @pytest.mark.parametrize("above_or_below_vocab_range", ["above", "below"])
@@ -241,8 +289,8 @@ def test_rejection_sampling_approximates_target_distribution(
         draft_and_target_probs_equal)
 
     sample_sizes = [10, 100, 1_000, 10_000, 100_000]
-    distance_wrt_reference = []
-    distance_wrt_target = []
+    distance_wrt_reference: List[float] = []
+    distance_wrt_target: List[float] = []
 
     for num_samples in sample_sizes:
         (reference_vs_rejsample_dist,
