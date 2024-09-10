@@ -525,6 +525,8 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.original_max_position_embeddings = original_max_position_embeddings
         self.base = base
+        short_factor = long_factor
+        short_mscale = long_mscale
         self.short_factor = long_factor
         self.long_factor = long_factor
         self.short_mscale = long_mscale
