@@ -525,9 +525,9 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         self.max_position_embeddings = max_position_embeddings
         self.original_max_position_embeddings = original_max_position_embeddings
         self.base = base
-        self.short_factor = short_factor
+        self.short_factor = long_factor
         self.long_factor = long_factor
-        self.short_mscale = short_mscale
+        self.short_mscale = long_mscale
         self.long_mscale = long_mscale
 
         scale = (self.max_position_embeddings /
@@ -575,8 +575,8 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         inv_freq = self._compute_inv_freq(rescale_factors)
         t = torch.arange(max_position_embeddings, dtype=torch.float)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
-        cos = freqs.cos() * mscale * self.scaling_factor
-        sin = freqs.sin() * mscale * self.scaling_factor
+        cos = freqs.cos() * mscale
+        sin = freqs.sin() * mscale
         cache = torch.cat((cos, sin), dim=-1)
         return cache
 
